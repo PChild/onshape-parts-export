@@ -1,8 +1,33 @@
 rules_version = '2';
+
 service firebase.storage {
   match /b/{bucket}/o {
-    // Manufacturing files are written by the Admin SDK only.
-    match /{file=**} {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function profile() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function task(taskId) {
+      return firestore.get(/databases/(default)/documents/tasks/$(taskId)).data;
+    }
+
+    function canManage(taskId) {
+      return profile().role == 'coach'
+        || (profile().role == 'student_leader' && profile().subteam == task(taskId).subteam);
+    }
+
+    match /task-attachments/{taskId}/{attachmentId}/{fileName} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && (canManage(taskId) || task(taskId).assigneeUids.hasAny([request.auth.uid]))
+        && (request.resource == null || request.resource.size <= 20 * 1024 * 1024);
+    }
+
+    // Manufacturing exports are written and managed only by the Admin SDK.
+    match /manufacturing/{path=**} {
       allow read, write: if false;
     }
   }

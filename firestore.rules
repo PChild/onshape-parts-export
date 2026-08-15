@@ -1,8 +1,177 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // OAuth tokens and export records are backend-only.
-    match /{document=**} {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function myRole() {
+      return myProfile().role;
+    }
+
+    function isCoach() {
+      return isSignedIn() && myRole() == 'coach';
+    }
+
+    function isStudentLeader() {
+      return isSignedIn() && myRole() == 'student_leader';
+    }
+
+    // Student leaders are scoped to their own subteam; coaches are not.
+    function canManageSubteam(subteam) {
+      return isCoach() || (isStudentLeader() && myProfile().subteam == subteam);
+    }
+
+    // --- users ---
+    match /users/{uid} {
+      // Anyone signed in can read profiles (needed to show assignee names,
+      // rosters, etc). Only coaches can create/change role, subteam, or certs.
+      allow read: if isSignedIn();
+      allow create: if isCoach();
+      allow update: if isCoach()
+        || (
+          isStudentLeader()
+          && resource.data.role != 'coach'
+          && resource.data.subteam == myProfile().subteam
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['certificationIds'])
+        )
+        || (isSignedIn() && request.auth.uid == uid
+            // Students may only touch their own display name and clear the
+            // must-reset-password flag — never their own role/certs/subteam.
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.subteam == resource.data.subteam
+            && request.resource.data.certificationIds == resource.data.certificationIds);
+      allow delete: if isCoach();
+    }
+
+    // --- certifications ---
+    match /certifications/{certId} {
+      allow read: if isSignedIn();
+      allow write: if isCoach();
+    }
+
+    // Short kiosk PINs are intentionally kept separate from user profiles so
+    // students cannot read one another's codes. The kiosk runs in a coach's
+    // authenticated session.
+    match /timeclockPins/{uid} {
+      allow read, write: if isCoach();
+    }
+
+    match /timeEntries/{entryId} {
+      allow read: if isCoach() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isCoach()
+        && request.resource.data.clockedInByUid == request.auth.uid
+        && request.resource.data.clockOut == null;
+      allow update: if isCoach()
+        && resource.data.clockOut == null
+        && request.resource.data.clockedOutByUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut', 'clockedOutByUid']);
+      allow delete: if isCoach();
+    }
+
+    // --- tasks ---
+    match /tasks/{taskId} {
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn() && canManageSubteam(request.resource.data.subteam);
+
+      allow delete: if isSignedIn() && canManageSubteam(resource.data.subteam);
+
+      // Updates: coaches and the task's own subteam leader can change anything,
+      // including directly setting the assignee list. A plain student may only
+      // join an open-to-them task they're certified for, leave a task they're
+      // on, or move the status of a task they're already assigned to.
+      allow update: if canManageSubteam(resource.data.subteam)
+        || (
+          isSignedIn() &&
+          (
+            // Join: add yourself to assigneeUids, nothing else changes, and
+            // you hold a matching certification (if the task requires one).
+            (
+              !resource.data.assigneeUids.hasAny([request.auth.uid]) &&
+              request.resource.data.assigneeUids.hasAll(resource.data.assigneeUids) &&
+              request.resource.data.assigneeUids.hasAll([request.auth.uid]) &&
+              request.resource.data.assigneeUids.size() == resource.data.assigneeUids.size() + 1 &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['assigneeUids', 'updatedAt', 'history']) &&
+              (
+                resource.data.requiredCertificationIds.size() == 0 ||
+                (resource.data.requireAllCertifications
+                  ? resource.data.requiredCertificationIds.hasAll(myProfile().certificationIds)
+                  : resource.data.requiredCertificationIds.hasAny(myProfile().certificationIds))
+              )
+            )
+            ||
+            // Leave: remove only yourself from assigneeUids.
+            (
+              resource.data.assigneeUids.hasAny([request.auth.uid]) &&
+              !request.resource.data.assigneeUids.hasAny([request.auth.uid]) &&
+              request.resource.data.assigneeUids.size() == resource.data.assigneeUids.size() - 1 &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['assigneeUids', 'updatedAt', 'history'])
+            )
+            ||
+            // Move a card you're already on: only status/updatedAt may change.
+            (
+              resource.data.assigneeUids.hasAny([request.auth.uid]) &&
+              request.resource.data.assigneeUids == resource.data.assigneeUids &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'history'])
+            )
+            ||
+            // Any signed-in team member may append an update under their own
+            // identity. Existing comments cannot be edited or removed.
+            (
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['comments', 'updatedAt']) &&
+              request.resource.data.comments.size() == resource.data.get('comments', []).size() + 1 &&
+              request.resource.data.comments.hasAll(resource.data.get('comments', [])) &&
+              request.resource.data.comments[resource.data.get('comments', []).size()].authorUid == request.auth.uid &&
+              request.resource.data.comments[resource.data.get('comments', []).size()].body is string &&
+              request.resource.data.comments[resource.data.get('comments', []).size()].body.size() > 0 &&
+              request.resource.data.comments[resource.data.get('comments', []).size()].body.size() <= 2000
+            )
+            ||
+            // Assignees may add or remove attachments on their task. Managers
+            // can do the same through the broader rule above.
+            (
+              resource.data.assigneeUids.hasAny([request.auth.uid]) &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attachments', 'updatedAt']) &&
+              (
+                (
+                  request.resource.data.attachments.size() == resource.data.get('attachments', []).size() + 1 &&
+                  request.resource.data.attachments.hasAll(resource.data.get('attachments', []))
+                )
+                ||
+                (
+                  request.resource.data.attachments.size() == resource.data.get('attachments', []).size() - 1 &&
+                  resource.data.get('attachments', []).hasAll(request.resource.data.attachments)
+                )
+              )
+            )
+          )
+        );
+    }
+
+    // --- subteams (simple reference list, coach-managed) ---
+    match /subteams/{subteamId} {
+      allow read: if isSignedIn();
+      allow write: if isCoach();
+    }
+
+    // OAuth state, session credentials, and manufacturing export records are
+    // written and managed only by the Admin SDK.
+    match /oauthStates/{stateId} {
+      allow read, write: if false;
+    }
+
+    match /onshapeSessions/{sessionId} {
+      allow read, write: if false;
+    }
+
+    match /exports/{exportId} {
       allow read, write: if false;
     }
   }
