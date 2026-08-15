@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.env*
+!.env.example
+functions/lib/
+functions/node_modules/
+.firebase/
+firebase-debug.log
+.reference-go-client/
+*.local

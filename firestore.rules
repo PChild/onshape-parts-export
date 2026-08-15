@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // OAuth tokens and export records are backend-only.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
