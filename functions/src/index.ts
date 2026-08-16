@@ -63,6 +63,7 @@ interface ExportBody {
   quantity: number;
   machiningType: "laser" | "plasma" | "waterjet" | "3D printed" | "lathe";
   material?: "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
+  materialThicknessInches?: number;
   subsystem?: string;
   context: {
     documentId: string;
@@ -357,6 +358,9 @@ function parseExportBody(value: unknown): ExportBody {
     throw new HttpError(400, `Choose a material that can be cut by ${machining}.`);
   }
   if (kind === "lathe" && !validLatheMaterials.includes(String(body.material))) throw new HttpError(400, "Choose Aluminum 7075, Polycarb, Steel, or Carbon Fiber for the lathe material.");
+  const materialThicknessInches = kind === "dxf"
+    ? readPositiveDimension(body.materialThicknessInches, "Material thickness")
+    : undefined;
   const wv = body.context.workspaceOrVersion;
   if (wv !== "w" && wv !== "v") throw new HttpError(400, "Invalid workspace or version type.");
 
@@ -366,6 +370,7 @@ function parseExportBody(value: unknown): ExportBody {
     quantity,
     machiningType: machining as ExportBody["machiningType"],
     material: kind === "step" ? "3D Print" : body.material,
+    materialThicknessInches,
     subsystem: kind === "dxf" || kind === "lathe" ? readOptionalString(body.subsystem, "Subsystem", 80) : undefined,
     context: {
       documentId: readId(body.context.documentId, "Document ID"),
@@ -896,6 +901,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     selectionId: body.selections[0].selectionId,
     ...(previewStoragePath ? { previewStoragePath } : {}),
     ...(body.material ? { material: body.material } : {}),
+    ...(body.materialThicknessInches ? { materialThicknessInches: String(body.materialThicknessInches) } : {}),
     ...(body.subsystem ? { subsystem: body.subsystem } : {}),
   };
   const uploads: Promise<unknown>[] = [bucket.file(storagePath).save(bytes, {

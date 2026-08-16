@@ -58,6 +58,7 @@ export interface ExportRequest {
   quantity: number;
   machiningType: MachiningType;
   material?: Material;
+  materialThicknessInches?: number;
   subsystem?: string;
   context: OnshapeContext;
   selections: OnshapeSelection[];

@@ -132,6 +132,7 @@ export function ExportApp() {
   const [quantity, setQuantity] = useState(1);
   const [machining, setMachining] = useState<DxfMachiningType>("laser");
   const [material, setMaterial] = useState<Material>("wood");
+  const [materialThickness, setMaterialThickness] = useState<number | undefined>();
   const [subsystem, setSubsystem] = useState("");
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
   const [latheDiameter, setLatheDiameter] = useState<number | undefined>();
@@ -299,9 +300,10 @@ export function ExportApp() {
       && user
       && sessionToken
       && submission !== "working"
+      && (kind !== "dxf" || positive(materialThickness))
       && (kind !== "lathe" || latheDetailsComplete),
     ),
-    [context, selections.length, requiredSelectionCount, friendlyName, quantity, user, sessionToken, submission, kind, latheDetailsComplete],
+    [context, selections.length, requiredSelectionCount, friendlyName, quantity, user, sessionToken, submission, kind, materialThickness, latheDetailsComplete],
   );
 
   const submit = async (event: FormEvent) => {
@@ -316,6 +318,7 @@ export function ExportApp() {
         quantity,
         machiningType: kind === "step" ? "3d printed" : kind === "lathe" ? "lathe" : machining,
         material: kind === "step" ? "3D Print" : material,
+        materialThicknessInches: kind === "dxf" ? materialThickness : undefined,
         subsystem: kind !== "step" && subsystem.trim() ? subsystem.trim() : undefined,
         context,
         selections,
@@ -387,7 +390,7 @@ export function ExportApp() {
               <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
-              {kind !== "step" && <><label className="field"><span>Material</span><select value={material} onChange={(e) => setMaterial(e.target.value as Material)}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label><label className="field"><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="e.g. Drivetrain" maxLength={80} /></label></>}
+              {kind !== "step" && <><label className="field"><span>Material</span><select value={material} onChange={(e) => setMaterial(e.target.value as Material)}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>{kind === "dxf" && <label className="field"><span>Material thickness <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}<label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="e.g. Drivetrain" maxLength={80} /></label></>}
               {kind === "lathe" && <>
                 <label className="field span-2"><span>Stock profile</span><select value={latheStockType} onChange={(event) => changeLatheStock(event.target.value as LatheStockType)}>{latheStockTypes.map((stock) => <option value={stock} key={stock}>{stock.replace(/\b\w/g, (character) => character.toUpperCase())}</option>)}</select></label>
                 {latheStockType === "round shaft" && <label className="field span-2"><span>Shaft diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={latheDiameter ?? ""} onChange={(event) => setLatheDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label>}

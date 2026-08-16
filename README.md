@@ -6,7 +6,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Select one solid part—or any face on that part—and export a STEP file for 3D printing.
 - Store STEP requests with the fixed material value `3d Print`.
 - Create a manual-lathe request without exporting a file by selecting its two planar end faces.
-- Require a friendly name and quantity; DXF and lathe requests also require material and accept an optional subsystem.
+- Require a friendly name and quantity; DXF requests also require material thickness in inches, while DXF and lathe requests require material and accept an optional subsystem.
 - Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel and aluminum; waterjet supports every listed DXF material.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Record the authenticated Onshape user with every export or manual request.
@@ -122,7 +122,7 @@ The workflow supplies the repository base path during the Next.js static build a
 
 The Storage object includes custom metadata for the request and the `exports/{exportId}` Firestore document includes:
 
-- friendly name, quantity, machining type, material, and subsystem
+- friendly name, quantity, machining type, material, DXF material thickness in inches, and subsystem
 - DXF or STEP type and selected face/body topology ID
 - Onshape document, workspace/version, element, and configuration
 - authenticated Onshape user ID, name, and email when available
