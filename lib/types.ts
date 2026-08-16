@@ -82,6 +82,13 @@ export interface DxfBounds {
   areaSquareInches: number;
 }
 
+export interface StepBounds {
+  xInches: number;
+  yInches: number;
+  zInches: number;
+  volumeCubicInches: number;
+}
+
 export interface ExportSuggestionsRequest {
   context: OnshapeContext;
   selection?: OnshapeSelection;
@@ -94,4 +101,5 @@ export interface ExportSuggestionsResult {
   friendlyName?: string;
   partMetadataFound?: boolean;
   dxfBounds?: DxfBounds;
+  stepBounds?: StepBounds;
 }

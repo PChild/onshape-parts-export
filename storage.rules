@@ -10,6 +10,10 @@ service firebase.storage {
       return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
     }
 
+    function isCoach() {
+      return isSignedIn() && profile().role == 'coach';
+    }
+
     function task(taskId) {
       return firestore.get(/databases/(default)/documents/tasks/$(taskId)).data;
     }
@@ -30,7 +34,10 @@ service firebase.storage {
     // members authenticated in the dashboard may download the finished files.
     match /manufacturing/{path=**} {
       allow read: if isSignedIn();
-      allow write: if false;
+      // Cloud Storage exposes deletes as writes whose request.resource is
+      // null. Coaches may delete existing manufacturing objects, while client
+      // uploads and overwrites remain blocked.
+      allow write: if isCoach() && request.resource == null;
     }
   }
 }

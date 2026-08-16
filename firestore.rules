@@ -1,5 +1,8 @@
 rules_version = '2';
 
+// Deploy this from the Firebase console: Firestore Database > Rules tab,
+// or via `firebase deploy --only firestore:rules` once you have the CLI set up.
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -176,7 +179,8 @@ service cloud.firestore {
     // separate shop-completion fields used by this dashboard.
     match /exports/{exportId} {
       allow read: if isSignedIn();
-      allow create, delete: if false;
+      allow create: if false;
+      allow delete: if isCoach();
       allow update: if isSignedIn()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'manufacturingStatus',
@@ -217,6 +221,22 @@ service cloud.firestore {
             && !('manufacturingCancelledBy' in request.resource.data)
           )
         );
+
+      match /comments/{commentId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+          && exists(/databases/$(database)/documents/exports/$(exportId))
+          && request.resource.data.keys().hasOnly(['body', 'authorUid', 'authorName', 'createdAt'])
+          && request.resource.data.body is string
+          && request.resource.data.body.size() > 0
+          && request.resource.data.body.size() <= 2000
+          && request.resource.data.authorUid == request.auth.uid
+          && request.resource.data.authorName == myProfile().displayName
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if isCoach();
+      }
     }
   }
 }

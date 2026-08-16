@@ -12,6 +12,7 @@ import type {
   OnshapeContext,
   OnshapeSelection,
   SessionUser,
+  StepBounds,
 } from "@/lib/types";
 
 type DxfMachiningType = "laser" | "plasma" | "waterjet";
@@ -177,6 +178,11 @@ export function ExportApp() {
     requestKey: string;
     status: "complete" | "unavailable";
     bounds?: DxfBounds;
+  } | null>(null);
+  const [stepBoundsResult, setStepBoundsResult] = useState<{
+    requestKey: string;
+    status: "complete" | "unavailable";
+    bounds?: StepBounds;
   } | null>(null);
   const [subsystem, setSubsystem] = useState("");
   const materialEdited = useRef(false);
@@ -373,6 +379,11 @@ export function ExportApp() {
   const dxfBoundsStatus = kind !== "dxf" || !suggestionSelection || !context || !sessionToken
     ? "idle"
     : currentDxfBoundsResult?.status ?? "loading";
+  const currentStepBoundsResult = stepBoundsResult?.requestKey === suggestionRequestKey ? stepBoundsResult : undefined;
+  const stepBounds = currentStepBoundsResult?.bounds;
+  const stepBoundsStatus = kind !== "step" || !suggestionSelection || !context || !sessionToken
+    ? "idle"
+    : currentStepBoundsResult?.status ?? "loading";
   useEffect(() => {
     const selectionChanged = suggestionSelectionKey !== lastSuggestionSelectionKey.current;
     if (selectionChanged) {
@@ -414,6 +425,13 @@ export function ExportApp() {
           bounds: suggestions.dxfBounds,
         });
       }
+      if (kind === "step" && suggestionSelection) {
+        setStepBoundsResult({
+          requestKey: suggestionRequestKey,
+          status: suggestions.stepBounds ? "complete" : "unavailable",
+          bounds: suggestions.stepBounds,
+        });
+      }
       if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
       const metadataMissing = Boolean(suggestionSelection)
         && suggestions.partMetadataFound !== true
@@ -444,6 +462,9 @@ export function ExportApp() {
       if (requestNumber === suggestionRequest.current) {
         if (kind === "dxf" && suggestionSelection) {
           setDxfBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+        }
+        if (kind === "step" && suggestionSelection) {
+          setStepBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
         }
         setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
       }
@@ -565,12 +586,20 @@ export function ExportApp() {
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
               {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { materialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
               {kind === "dxf" && <label className={`field ${materialThicknessComplete ? "" : "missing"}`}><span>Material thickness <em>in</em></span><input aria-invalid={!materialThicknessComplete} type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
-              {kind === "dxf" && suggestionSelection && <div className={`stock-envelope span-2 ${dxfBoundsStatus}`} aria-live="polite">
+              {kind === "dxf" && suggestionSelection && <div className={`bounds-card span-2 ${dxfBoundsStatus}`} aria-live="polite">
                 <div><span>DXF stock envelope</span>{dxfBounds
                   ? <strong>{formatInches(dxfBounds.widthInches)} × {formatInches(dxfBounds.heightInches)} in</strong>
                   : <strong>{dxfBoundsStatus === "loading" ? "Measuring selected face…" : dxfBoundsStatus === "idle" ? "Connect to measure" : "Measurement unavailable"}</strong>}</div>
                 <p>{dxfBounds
                   ? `${dxfBounds.areaSquareInches.toLocaleString(undefined, { maximumFractionDigits: 2 })} in² minimum rectangular area. Choose stock larger than this envelope for edge clearance.`
+                  : "This estimate is optional and does not block the export."}</p>
+              </div>}
+              {kind === "step" && suggestionSelection && <div className={`bounds-card span-2 ${stepBoundsStatus}`} aria-live="polite">
+                <div><span>3D print bounding box</span>{stepBounds
+                  ? <strong>{formatInches(stepBounds.xInches)} × {formatInches(stepBounds.yInches)} × {formatInches(stepBounds.zInches)} in</strong>
+                  : <strong>{stepBoundsStatus === "loading" ? "Measuring selected part…" : stepBoundsStatus === "idle" ? "Connect to measure" : "Measurement unavailable"}</strong>}</div>
+                <p>{stepBounds
+                  ? `${stepBounds.volumeCubicInches.toLocaleString(undefined, { maximumFractionDigits: 2 })} in³ bounding-box volume along the Part Studio X/Y/Z axes. The part can still be reoriented in the slicer.`
                   : "This estimate is optional and does not block the export."}</p>
               </div>}
               <label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => { subsystemEdited.current = true; setSubsystem(e.target.value); }} placeholder="Defaults to the Onshape document name" maxLength={80} /></label>

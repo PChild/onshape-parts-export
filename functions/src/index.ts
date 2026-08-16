@@ -45,6 +45,18 @@ const DXF_BOUNDS_FEATURESCRIPT = `function(context is Context, queries is map)
     (bounds.maxCorner[1] - bounds.minCorner[1]) / inch
   ];
 }`;
+const STEP_BOUNDS_FEATURESCRIPT = `function(context is Context, queries is map)
+{
+  const bounds = evBox3d(context, {
+    "topology" : queries.part,
+    "tight" : true
+  });
+  return [
+    (bounds.maxCorner[0] - bounds.minCorner[0]) / inch,
+    (bounds.maxCorner[1] - bounds.minCorner[1]) / inch,
+    (bounds.maxCorner[2] - bounds.minCorner[2]) / inch
+  ];
+}`;
 
 type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
@@ -118,6 +130,13 @@ interface DxfBounds {
   widthInches: number;
   heightInches: number;
   areaSquareInches: number;
+}
+
+interface StepBounds {
+  xInches: number;
+  yInches: number;
+  zInches: number;
+  volumeCubicInches: number;
 }
 
 function normalizedConfiguredOrigin(): string {
@@ -828,6 +847,51 @@ async function getDxfFaceBounds(
   };
 }
 
+async function getStepPartBounds(
+  context: ExportBody["context"],
+  partId: string,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<StepBounds> {
+  const endpoint = new URL(
+    `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}/featurescript`,
+  );
+  endpoint.searchParams.set("rollbackBarIndex", "-1");
+  if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+  const response = await authorizedOnshapeFetch(endpoint.toString(), {
+    method: "POST",
+    headers: {
+      Accept: "application/json;charset=UTF-8; qs=0.09",
+      "Content-Type": "application/json;charset=UTF-8; qs=0.09",
+    },
+    body: JSON.stringify({
+      script: STEP_BOUNDS_FEATURESCRIPT,
+      queries: { part: [partId] },
+    }),
+  }, session, sessionId);
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not measure the selected STEP part. ${responseText.slice(0, 500)}`.trim());
+  }
+  const payload = (() => {
+    try { return JSON.parse(responseText) as unknown; } catch { return undefined; }
+  })();
+  const dimensions = featureScriptNumberArray(payload);
+  const xInches = dimensions?.[0];
+  const yInches = dimensions?.[1];
+  const zInches = dimensions?.[2];
+  if (!xInches || !yInches || !zInches || xInches <= 0 || yInches <= 0 || zInches <= 0) {
+    throw new HttpError(502, "Onshape returned an invalid STEP part measurement.");
+  }
+  return {
+    xInches: roundedMeasurement(xInches),
+    yInches: roundedMeasurement(yInches),
+    zInches: roundedMeasurement(zInches),
+    volumeCubicInches: roundedMeasurement(xInches * yInches * zInches),
+  };
+}
+
 async function selectedPartId(
   body: ExportBody,
   session: StoredSession,
@@ -1246,7 +1310,7 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     return undefined;
   });
 
-  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean; dxfBounds?: DxfBounds }> => {
+  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean; dxfBounds?: DxfBounds; stepBounds?: StepBounds }> => {
     const resolved = await resolveAssemblySelections(context, [selection], session, sessionId, version);
     const sourceContext = resolved.context;
     const sourceSelection = resolved.selections[0];
@@ -1255,6 +1319,12 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     const dxfBoundsPromise = suggestionKind === "dxf" && sourceSelection.entityType === "FACE"
       ? getDxfFaceBounds(sourceContext, sourceSelection, session, sessionId, version).catch((error: unknown) => {
           console.warn("Could not measure the selected DXF face.", error);
+          return undefined;
+        })
+      : Promise.resolve(undefined);
+    const stepBoundsPromise = suggestionKind === "step" && partId
+      ? getStepPartBounds(sourceContext, partId, session, sessionId, version).catch((error: unknown) => {
+          console.warn("Could not measure the selected STEP part.", error);
           return undefined;
         })
       : Promise.resolve(undefined);
@@ -1280,8 +1350,8 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
       console.warn("Could not suggest the selected Onshape part details.", error);
       return { partMetadataFound: false };
     });
-    const [dxfBounds, metadata] = await Promise.all([dxfBoundsPromise, metadataPromise]);
-    return { ...metadata, ...(dxfBounds ? { dxfBounds } : {}) };
+    const [dxfBounds, stepBounds, metadata] = await Promise.all([dxfBoundsPromise, stepBoundsPromise, metadataPromise]);
+    return { ...metadata, ...(dxfBounds ? { dxfBounds } : {}), ...(stepBounds ? { stepBounds } : {}) };
   })().catch((error: unknown) => {
     console.warn("Could not resolve the selected Onshape part details.", error);
     return { partMetadataFound: false };
@@ -1364,10 +1434,17 @@ async function handleExport(req: Request, res: Response): Promise<void> {
         return undefined;
       })
     : Promise.resolve(undefined);
-  const [{ bytes, contentType }, preview, dxfBounds] = await Promise.all([
+  const stepBoundsPromise = body.kind === "step"
+    ? getStepPartBounds(body.context, partId, session, sessionId, version).catch((error: unknown) => {
+        console.error("Could not measure the exported STEP part.", error);
+        return undefined;
+      })
+    : Promise.resolve(undefined);
+  const [{ bytes, contentType }, preview, dxfBounds, stepBounds] = await Promise.all([
     callOnshapeExport(body, session, sessionId, partId, faceView),
     previewPromise,
     dxfBoundsPromise,
+    stepBoundsPromise,
   ]);
   const extension = body.kind;
   const fileName = `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}.${extension}`;
@@ -1395,6 +1472,12 @@ async function handleExport(req: Request, res: Response): Promise<void> {
       dxfWidthInches: String(dxfBounds.widthInches),
       dxfHeightInches: String(dxfBounds.heightInches),
       dxfAreaSquareInches: String(dxfBounds.areaSquareInches),
+    } : {}),
+    ...(stepBounds ? {
+      stepXInches: String(stepBounds.xInches),
+      stepYInches: String(stepBounds.yInches),
+      stepZInches: String(stepBounds.zInches),
+      stepBoundingVolumeCubicInches: String(stepBounds.volumeCubicInches),
     } : {}),
   };
   const uploads: Promise<unknown>[] = [bucket.file(storagePath).save(bytes, {
@@ -1430,6 +1513,8 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     previewStatus: preview ? "complete" : "unavailable",
     ...(body.kind === "dxf" ? { dxfBoundsStatus: dxfBounds ? "complete" : "unavailable" } : {}),
     ...(dxfBounds ? { dxfBounds } : {}),
+    ...(body.kind === "step" ? { stepBoundsStatus: stepBounds ? "complete" : "unavailable" } : {}),
+    ...(stepBounds ? { stepBounds } : {}),
     ...(preview && previewFileName && previewStoragePath ? {
       previewFileName,
       previewStoragePath,
