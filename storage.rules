@@ -26,9 +26,11 @@ service firebase.storage {
         && (request.resource == null || request.resource.size <= 20 * 1024 * 1024);
     }
 
-    // Manufacturing exports are written and managed only by the Admin SDK.
+    // The Onshape exporter's Admin SDK owns manufacturing file writes. Team
+    // members authenticated in the dashboard may download the finished files.
     match /manufacturing/{path=**} {
-      allow read, write: if false;
+      allow read: if isSignedIn();
+      allow write: if false;
     }
   }
 }

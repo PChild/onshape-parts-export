@@ -69,4 +69,5 @@ export interface ExportResult {
   kind: ExportKind;
   storagePath?: string;
   fileName?: string;
+  previewStoragePath?: string;
 }

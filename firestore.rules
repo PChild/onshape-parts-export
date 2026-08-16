@@ -161,8 +161,8 @@ service cloud.firestore {
       allow write: if isCoach();
     }
 
-    // OAuth state, session credentials, and manufacturing request records are
-    // written and managed only by the Admin SDK.
+    // OAuth state and session credentials belong exclusively to the Onshape
+    // exporter's backend. The Admin SDK bypasses these client rules.
     match /oauthStates/{stateId} {
       allow read, write: if false;
     }
@@ -171,8 +171,52 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Manufacturing requests are created by the Onshape exporter through the
+    // Admin SDK. Signed-in team members can inspect them and only update the
+    // separate shop-completion fields used by this dashboard.
     match /exports/{exportId} {
-      allow read, write: if false;
+      allow read: if isSignedIn();
+      allow create, delete: if false;
+      allow update: if isSignedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'manufacturingStatus',
+          'manufacturingCompletedAt',
+          'manufacturingCompletedBy',
+          'manufacturingCancelledAt',
+          'manufacturingCancelledBy'
+        ])
+        && request.resource.data.manufacturingStatus in ['pending', 'complete', 'cancelled']
+        && (
+          (
+            request.resource.data.manufacturingStatus == 'complete'
+            && request.resource.data.manufacturingCompletedAt is timestamp
+            && request.resource.data.manufacturingCompletedAt == request.time
+            && request.resource.data.manufacturingCompletedBy.keys().hasOnly(['uid', 'name'])
+            && request.resource.data.manufacturingCompletedBy.uid == request.auth.uid
+            && request.resource.data.manufacturingCompletedBy.name == myProfile().displayName
+            && !('manufacturingCancelledAt' in request.resource.data)
+            && !('manufacturingCancelledBy' in request.resource.data)
+          )
+          ||
+          (
+            request.resource.data.manufacturingStatus == 'cancelled'
+            && request.resource.data.manufacturingCancelledAt is timestamp
+            && request.resource.data.manufacturingCancelledAt == request.time
+            && request.resource.data.manufacturingCancelledBy.keys().hasOnly(['uid', 'name'])
+            && request.resource.data.manufacturingCancelledBy.uid == request.auth.uid
+            && request.resource.data.manufacturingCancelledBy.name == myProfile().displayName
+            && !('manufacturingCompletedAt' in request.resource.data)
+            && !('manufacturingCompletedBy' in request.resource.data)
+          )
+          ||
+          (
+            request.resource.data.manufacturingStatus == 'pending'
+            && !('manufacturingCompletedAt' in request.resource.data)
+            && !('manufacturingCompletedBy' in request.resource.data)
+            && !('manufacturingCancelledAt' in request.resource.data)
+            && !('manufacturingCancelledBy' in request.resource.data)
+          )
+        );
     }
   }
 }

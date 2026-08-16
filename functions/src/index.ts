@@ -21,8 +21,11 @@ const OAUTH_TOKEN_URL = "https://oauth.onshape.com/oauth/token";
 const STATE_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_EXPORT_BYTES = 250 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 5 * 1024 * 1024;
 const EXPORT_RESULT_TIMEOUT_MS = 2 * 60 * 1000;
 const EXPORT_RESULT_POLL_MS = 1_000;
+const PREVIEW_SIZE = 512;
+const ISOMETRIC_VIEW_MATRIX = "0.612,0.612,0,0,-0.354,0.354,0.707,0,0.707,-0.707,0.707,0";
 
 type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
@@ -474,8 +477,9 @@ async function selectedFaceView(
   session: StoredSession,
   sessionId: string,
   version: string,
+  bodyDetails?: OnshapeBodyDetails[],
 ): Promise<string> {
-  const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const bodies = bodyDetails ?? await getPartStudioBodyDetails(body, session, sessionId, version);
   const selection = body.selections[0];
   const face = bodies
     .flatMap((part) => Array.isArray(part.faces) ? part.faces : [])
@@ -494,8 +498,9 @@ async function selectedPartId(
   session: StoredSession,
   sessionId: string,
   version: string,
+  bodyDetails?: OnshapeBodyDetails[],
 ): Promise<string> {
-  const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const bodies = bodyDetails ?? await getPartStudioBodyDetails(body, session, sessionId, version);
   const selection = body.selections[0];
   const selectedIds = new Set([selection.selectionId, selection.partId].filter((value): value is string => Boolean(value)));
   const selectedBody = bodies.find((candidate) =>
@@ -505,6 +510,71 @@ async function selectedPartId(
   if (typeof selectedBody?.id === "string" && selectedBody.id) return selectedBody.id;
   if (selection.entityType === "BODY") return selection.partId ?? selection.selectionId;
   throw new HttpError(422, "The selected face no longer belongs to a part in the current Part Studio configuration.");
+}
+
+interface ExportPreview {
+  bytes: Buffer;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  extension: "png" | "jpg" | "webp";
+}
+
+function decodeShadedView(payload: unknown): ExportPreview | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const images = (payload as { images?: unknown }).images;
+  if (!Array.isArray(images)) return undefined;
+  const groups = images.filter((group): group is unknown[] => Array.isArray(group));
+  const individualCandidates = groups.flatMap((group) => group);
+  const joinedCandidates = groups.map((group) => group.filter((item): item is string => typeof item === "string").join(""));
+  const candidates = [...individualCandidates, ...joinedCandidates];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate) continue;
+    const encoded = candidate.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").replace(/\s+/g, "");
+    const bytes = Buffer.from(encoded, "base64");
+    if (!bytes.length || bytes.length > MAX_PREVIEW_BYTES) continue;
+    if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      return { bytes, contentType: "image/png", extension: "png" };
+    }
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return { bytes, contentType: "image/jpeg", extension: "jpg" };
+    }
+    if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+      return { bytes, contentType: "image/webp", extension: "webp" };
+    }
+  }
+  return undefined;
+}
+
+async function getPartPreview(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+  partId: string,
+  viewMatrix: string,
+): Promise<ExportPreview | undefined> {
+  const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
+  const endpoint = new URL(
+    `${session.server}/api/${version}/parts/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/partid/${encodeURIComponent(partId)}/shadedviews`,
+  );
+  endpoint.searchParams.set("viewMatrix", viewMatrix);
+  endpoint.searchParams.set("outputHeight", String(PREVIEW_SIZE));
+  endpoint.searchParams.set("outputWidth", String(PREVIEW_SIZE));
+  endpoint.searchParams.set("pixelSize", "0");
+  endpoint.searchParams.set("edges", "show");
+  endpoint.searchParams.set("useAntiAliasing", "true");
+  if (configuration) endpoint.searchParams.set("configuration", configuration);
+  const response = await authorizedOnshapeFetch(endpoint.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  }, session, sessionId);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`Onshape preview request failed (${response.status}). ${detail}`.trim());
+  }
+  const payload = await response.json().catch(() => null);
+  const preview = decodeShadedView(payload);
+  if (!preview) throw new Error("Onshape returned no supported shaded-view image.");
+  return preview;
 }
 
 async function selectedLathePartId(
@@ -531,7 +601,13 @@ async function selectedLathePartId(
   return [...partIds][0];
 }
 
-async function callOnshapeExport(body: ExportBody, session: StoredSession, sessionId: string): Promise<{ bytes: Buffer; contentType: string }> {
+async function callOnshapeExport(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  resolvedPartId?: string,
+  resolvedFaceView?: string,
+): Promise<{ bytes: Buffer; contentType: string }> {
   if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
   const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
   const version = apiVersion.value().replace(/^\//, "");
@@ -548,7 +624,7 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
       format: "DXF",
       destinationName: safeFileStem(body.friendlyName),
       partIds: body.selections[0].selectionId,
-      view: await selectedFaceView(body, session, sessionId, version),
+      view: resolvedFaceView ?? await selectedFaceView(body, session, sessionId, version),
       version: "2018",
       flatten: true,
       splinesAsPolylines: true,
@@ -562,7 +638,7 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
     endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
     payload = {
       formatName: "STEP",
-      partIds: await selectedPartId(body, session, sessionId, version),
+      partIds: resolvedPartId ?? await selectedPartId(body, session, sessionId, version),
       storeInDocument: false,
       translate: true,
       ...(configuration ? { configuration } : {}),
@@ -785,11 +861,27 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     res.status(201).json({ exportId, kind: body.kind });
     return;
   }
-  const { bytes, contentType } = await callOnshapeExport(body, session, sessionId);
+  const version = apiVersion.value().replace(/^\//, "");
+  const bodyDetails = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const partId = await selectedPartId(body, session, sessionId, version, bodyDetails);
+  const faceView = body.kind === "dxf"
+    ? await selectedFaceView(body, session, sessionId, version, bodyDetails)
+    : undefined;
+  const previewView = faceView ? faceView.split(",").slice(0, 12).join(",") : ISOMETRIC_VIEW_MATRIX;
+  const previewPromise = getPartPreview(body, session, sessionId, version, partId, previewView).catch((error: unknown) => {
+    console.error("Could not create Onshape export preview.", error);
+    return undefined;
+  });
+  const [{ bytes, contentType }, preview] = await Promise.all([
+    callOnshapeExport(body, session, sessionId, partId, faceView),
+    previewPromise,
+  ]);
   const extension = body.kind;
   const fileName = `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}.${extension}`;
   const dateFolder = new Date().toISOString().slice(0, 10);
   const storagePath = `manufacturing/${body.kind}/${dateFolder}/${fileName}`;
+  const previewFileName = preview ? `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}-preview.${preview.extension}` : undefined;
+  const previewStoragePath = previewFileName ? `manufacturing/previews/${dateFolder}/${previewFileName}` : undefined;
   const bucket = getStorage().bucket(storageBucket.value() || undefined);
   const customMetadata: Record<string, string> = {
     exportId,
@@ -800,28 +892,57 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     onshapeUserName: session.user.name,
     documentId: body.context.documentId,
     elementId: body.context.elementId,
+    partId,
     selectionId: body.selections[0].selectionId,
+    ...(previewStoragePath ? { previewStoragePath } : {}),
     ...(body.material ? { material: body.material } : {}),
     ...(body.subsystem ? { subsystem: body.subsystem } : {}),
   };
-  await bucket.file(storagePath).save(bytes, {
+  const uploads: Promise<unknown>[] = [bucket.file(storagePath).save(bytes, {
     resumable: false,
     contentType,
     metadata: { cacheControl: "private, max-age=0", metadata: customMetadata },
-  });
+  })];
+  if (preview && previewStoragePath) {
+    uploads.push(bucket.file(previewStoragePath).save(preview.bytes, {
+      resumable: false,
+      contentType: preview.contentType,
+      metadata: {
+        cacheControl: "private, max-age=0",
+        metadata: {
+          exportId,
+          friendlyName: body.friendlyName,
+          kind: body.kind,
+          partId,
+          source: "onshape-shaded-view",
+        },
+      },
+    }));
+  }
+  await Promise.all(uploads);
   const exportRequestMetadata = withoutUndefined(body) as Record<string, unknown>;
   await db.collection("exports").doc(exportId).set({
     ...exportRequestMetadata,
+    partId,
     fileName,
     storagePath,
     byteLength: bytes.length,
     contentType,
+    previewStatus: preview ? "complete" : "unavailable",
+    ...(preview && previewFileName && previewStoragePath ? {
+      previewFileName,
+      previewStoragePath,
+      previewByteLength: preview.bytes.length,
+      previewContentType: preview.contentType,
+      previewWidth: PREVIEW_SIZE,
+      previewHeight: PREVIEW_SIZE,
+    } : {}),
     requestedBy: session.user,
     sessionId,
     status: "complete",
     createdAt: FieldValue.serverTimestamp(),
   });
-  res.status(201).json({ exportId, kind: body.kind, storagePath, fileName });
+  res.status(201).json({ exportId, kind: body.kind, storagePath, fileName, previewStoragePath });
 }
 
 async function handler(req: Request, res: Response): Promise<void> {
