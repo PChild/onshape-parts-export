@@ -75,6 +75,12 @@ function blankEndOperation(): LatheEndOperation {
   return { operation: "leave as modeled" };
 }
 
+function defaultEndOperation(operation: LatheEndOperation["operation"]): LatheEndOperation {
+  return operation === "tap"
+    ? { operation, thread: "10-32", depthInches: 1 }
+    : { operation };
+}
+
 function positive(value: number | undefined): boolean {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -111,7 +117,7 @@ function EndOperationFields({
     <details className="end-operation" open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
       <summary><span><strong>{title}</strong><small>{subtitle} · {operationLabel}</small></span></summary>
       <div className="end-operation-fields">
-        <label className="field span-2"><span>Operation</span><select value={value.operation} onChange={(event) => onChange({ operation: event.target.value as LatheEndOperation["operation"] })}><option value="leave as modeled">Leave as modeled</option><option value="turn down">Turn down for bearing</option><option value="tap">Tap</option><option value="drill">Drill</option><option value="other">Other</option></select></label>
+        <label className="field span-2"><span>Operation</span><select value={value.operation} onChange={(event) => onChange(defaultEndOperation(event.target.value as LatheEndOperation["operation"]))}><option value="leave as modeled">Leave as modeled</option><option value="turn down">Turn down for bearing</option><option value="tap">Tap</option><option value="drill">Drill</option><option value="other">Other</option></select></label>
         {value.operation === "turn down" && <><label className="field"><span>Target diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.375" required /></label><label className="field"><span>Turned length <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.lengthInches ?? ""} onChange={(event) => update({ lengthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.5" required /></label></>}
         {value.operation === "tap" && <><label className="field"><span>Thread</span><input value={value.thread ?? ""} onChange={(event) => update({ thread: event.target.value })} placeholder="e.g. 1/4-20" maxLength={40} required /></label><label className="field"><span>Thread depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.75" required /></label></>}
         {value.operation === "drill" && <><label className="field"><span>Hole diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.25" required /></label><label className="field"><span>Hole depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 1.0" required /></label></>}
