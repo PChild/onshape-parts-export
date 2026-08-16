@@ -21,6 +21,8 @@ const OAUTH_TOKEN_URL = "https://oauth.onshape.com/oauth/token";
 const STATE_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_EXPORT_BYTES = 250 * 1024 * 1024;
+const EXPORT_RESULT_TIMEOUT_MS = 2 * 60 * 1000;
+const EXPORT_RESULT_POLL_MS = 1_000;
 
 type ExportKind = "dxf" | "step";
 type SelectionType = "FACE" | "BODY";
@@ -136,6 +138,38 @@ async function exchangeToken(parameters: Record<string, string>): Promise<TokenR
     throw new HttpError(502, payload?.error_description ?? "Onshape authorization failed.");
   }
   return payload as TokenResponse;
+}
+
+async function refreshSessionAccessToken(session: StoredSession, sessionId: string): Promise<void> {
+  const refreshed = await exchangeToken({ grant_type: "refresh_token", refresh_token: session.refreshToken });
+  session.accessToken = refreshed.access_token;
+  session.refreshToken = refreshed.refresh_token ?? session.refreshToken;
+  session.accessExpiresAt = Timestamp.fromMillis(Date.now() + (refreshed.expires_in ?? 3600) * 1000);
+  await db.collection("onshapeSessions").doc(sessionId).update({
+    accessToken: session.accessToken,
+    refreshToken: session.refreshToken,
+    accessExpiresAt: session.accessExpiresAt,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+}
+
+async function authorizedOnshapeFetch(
+  url: string,
+  init: RequestInit,
+  session: StoredSession,
+  sessionId: string,
+): Promise<globalThis.Response> {
+  const invoke = (token: string) => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+    return fetch(url, { ...init, headers });
+  };
+  let response = await invoke(session.accessToken);
+  if (response.status === 401) {
+    await refreshSessionAccessToken(session, sessionId);
+    response = await invoke(session.accessToken);
+  }
+  return response;
 }
 
 async function loadSession(req: Request): Promise<{ id: string; data: StoredSession }> {
@@ -258,49 +292,87 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
     });
   }
 
-  const invoke = (token: string) => fetch(endpoint, {
+  let response = await authorizedOnshapeFetch(endpoint, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
       Accept: "application/octet-stream, application/json",
       "Content-Type": "application/json;charset=UTF-8",
     },
     body: JSON.stringify(payload),
     redirect: "follow",
-  });
+  }, session, sessionId);
 
-  let response = await invoke(session.accessToken);
-  if (response.status === 401) {
-    const refreshed = await exchangeToken({ grant_type: "refresh_token", refresh_token: session.refreshToken });
-    session.accessToken = refreshed.access_token;
-    session.refreshToken = refreshed.refresh_token ?? session.refreshToken;
-    session.accessExpiresAt = Timestamp.fromMillis(Date.now() + (refreshed.expires_in ?? 3600) * 1000);
-    await db.collection("onshapeSessions").doc(sessionId).update({
-      accessToken: session.accessToken,
-      refreshToken: session.refreshToken,
-      accessExpiresAt: session.accessExpiresAt,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-    response = await invoke(session.accessToken);
+  let resultUrl: string | undefined;
+  const deadline = Date.now() + EXPORT_RESULT_TIMEOUT_MS;
+  while (true) {
+    if (!response.ok) {
+      const retryable = Boolean(resultUrl) && [404, 409, 425, 429, 500, 502, 503, 504].includes(response.status);
+      if (retryable && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, EXPORT_RESULT_POLL_MS));
+        response = await authorizedOnshapeFetch(resultUrl!, {
+          method: "GET",
+          headers: { Accept: "application/octet-stream, application/json" },
+          redirect: "follow",
+        }, session, sessionId);
+        continue;
+      }
+      const errorText = await response.text();
+      let detail = errorText.slice(0, 500);
+      try {
+        const parsed = JSON.parse(errorText) as { message?: string; error?: string };
+        detail = parsed.message ?? parsed.error ?? detail;
+      } catch { /* Onshape sometimes returns plain text. */ }
+      throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not create this export. ${detail}`.trim());
+    }
+
+    const contentType = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() || "application/octet-stream";
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_EXPORT_BYTES) {
+      throw new HttpError(413, "The export is larger than the 250 MB classroom limit.");
+    }
+
+    if (!contentType.includes("json") && response.status !== 202 && response.status !== 204) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!bytes.length) throw new HttpError(502, "Onshape returned an empty export.");
+      if (bytes.length > MAX_EXPORT_BYTES) throw new HttpError(413, "The export is larger than the 250 MB classroom limit.");
+      return { bytes, contentType };
+    }
+
+    if (contentType.includes("json")) {
+      const metadata = await response.json().catch(() => null) as {
+        href?: unknown;
+        requestState?: unknown;
+        failureReason?: unknown;
+        message?: unknown;
+      } | null;
+      const state = typeof metadata?.requestState === "string" ? metadata.requestState.toUpperCase() : "";
+      if (state === "FAILED") {
+        const reason = typeof metadata?.failureReason === "string" ? metadata.failureReason : "The export job failed.";
+        throw new HttpError(502, `Onshape could not create this export. ${reason}`);
+      }
+      if (typeof metadata?.href === "string") {
+        try {
+          const candidate = new URL(metadata.href, session.server);
+          safeOnshapeOrigin(candidate.origin);
+          resultUrl = candidate.toString();
+        } catch {
+          throw new HttpError(502, "Onshape returned an invalid export result URL.");
+        }
+      } else if (!resultUrl && state !== "ACTIVE") {
+        const detail = typeof metadata?.message === "string" ? metadata.message : "The response did not contain a result URL.";
+        throw new HttpError(502, `Onshape returned incomplete export metadata. ${detail}`);
+      }
+    }
+
+    if (!resultUrl) throw new HttpError(502, "Onshape did not provide an export result URL.");
+    if (Date.now() >= deadline) throw new HttpError(504, "Onshape did not finish the export within two minutes.");
+    await new Promise((resolve) => setTimeout(resolve, EXPORT_RESULT_POLL_MS));
+    response = await authorizedOnshapeFetch(resultUrl, {
+      method: "GET",
+      headers: { Accept: "application/octet-stream, application/json" },
+      redirect: "follow",
+    }, session, sessionId);
   }
-  if (!response.ok) {
-    const errorText = await response.text();
-    let detail = errorText.slice(0, 500);
-    try {
-      const parsed = JSON.parse(errorText) as { message?: string; error?: string };
-      detail = parsed.message ?? parsed.error ?? detail;
-    } catch { /* Onshape sometimes returns plain text. */ }
-    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not create this export. ${detail}`.trim());
-  }
-  const contentType = response.headers.get("content-type")?.split(";")[0] || "application/octet-stream";
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (!bytes.length) throw new HttpError(502, "Onshape returned an empty export.");
-  if (contentType.includes("json")) {
-    const detail = bytes.toString("utf8", 0, Math.min(bytes.length, 500));
-    throw new HttpError(502, `Onshape returned export metadata instead of a file. ${detail}`.trim());
-  }
-  if (bytes.length > MAX_EXPORT_BYTES) throw new HttpError(413, "The export is larger than the 250 MB classroom limit.");
-  return { bytes, contentType };
 }
 
 async function startOAuth(req: Request, res: Response): Promise<void> {
