@@ -25,9 +25,9 @@ const preferredMachiningByMaterial: Partial<Record<Material, DxfMachiningType>> 
   wood: "laser",
   polycarb: "laser",
   SRPP: "laser",
-  "aluminum 6061": "plasma",
-  "aluminum 7075": "plasma",
-  "aluminum 5052": "plasma",
+  "aluminum 6061": "waterjet",
+  "aluminum 7075": "waterjet",
+  "aluminum 5052": "waterjet",
   steel: "plasma",
   "carbon fiber": "waterjet",
 };
@@ -167,10 +167,11 @@ export function ExportApp() {
   const [material, setMaterial] = useState<Material>("wood");
   const [materialThickness, setMaterialThickness] = useState<number | undefined>();
   const [subsystem, setSubsystem] = useState("");
-  const dxfMaterialEdited = useRef(false);
+  const materialEdited = useRef(false);
   const machiningEdited = useRef(false);
   const subsystemEdited = useRef(false);
   const suggestionRequest = useRef(0);
+  const lastSuggestionSelectionKey = useRef("");
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
   const [latheDiameter, setLatheDiameter] = useState<number | undefined>();
   const [tubeOuterDiameter, setTubeOuterDiameter] = useState<number | undefined>();
@@ -337,20 +338,55 @@ export function ExportApp() {
   };
 
   const suggestionSelection = selections[0];
+  const suggestionSelectionKey = suggestionSelection
+    ? [
+        suggestionSelection.entityType,
+        suggestionSelection.selectionId,
+        suggestionSelection.partId ?? "",
+        ...(suggestionSelection.occurrencePath ?? []),
+      ].join(":")
+    : "";
   useEffect(() => {
-    if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
+    const selectionChanged = suggestionSelectionKey !== lastSuggestionSelectionKey.current;
+    if (selectionChanged) {
+      lastSuggestionSelectionKey.current = suggestionSelectionKey;
+      friendlyNameEdited.current = false;
+      materialEdited.current = false;
+      machiningEdited.current = false;
+      queueMicrotask(() => {
+        if (lastSuggestionSelectionKey.current !== suggestionSelectionKey) return;
+        setFriendlyName("");
+        if (kind === "lathe") setMaterial("aluminum 7075");
+        if (kind === "dxf") setMaterial(dxfMaterialsByMachining[machining][0]);
+      });
+    }
     const requestNumber = ++suggestionRequest.current;
+    if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
     getExportSuggestions(sessionToken, {
       context,
       selection: suggestionSelection,
     }).then((suggestions) => {
       if (requestNumber !== suggestionRequest.current) return;
       if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
-      if ((kind === "step" || kind === "lathe") && !friendlyNameEdited.current && suggestions.friendlyName) {
+      if (!friendlyNameEdited.current && suggestions.friendlyName) {
         setFriendlyName(suggestions.friendlyName);
       }
       const suggestedMaterial = suggestions.material;
-      if (kind !== "dxf" || !suggestedMaterial || dxfMaterialEdited.current) return;
+      if (!suggestedMaterial || materialEdited.current) return;
+      if (kind === "lathe") {
+        if (latheMaterials.includes(suggestedMaterial)) setMaterial(suggestedMaterial);
+        return;
+      }
+      if (kind !== "dxf") return;
+      if (suggestedMaterial.startsWith("aluminum ")) {
+        if (!machiningEdited.current) {
+          setMachining("waterjet");
+          setMaterial(suggestedMaterial);
+        } else if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
+          setMaterial(suggestedMaterial);
+        }
+        return;
+      }
       if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
         setMaterial(suggestedMaterial);
         return;
@@ -363,7 +399,7 @@ export function ExportApp() {
     }).catch(() => {
       // Suggestions are best-effort and should never block a manual export.
     });
-  }, [context, suggestionSelection, kind, machining, sessionToken]);
+  }, [context, suggestionSelection, suggestionSelectionKey, kind, machining, sessionToken]);
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -474,7 +510,7 @@ export function ExportApp() {
               <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
-              {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { if (kind === "dxf") dxfMaterialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
+              {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { materialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
               {kind === "dxf" && <label className="field"><span>Material thickness <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
               <label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => { subsystemEdited.current = true; setSubsystem(e.target.value); }} placeholder="Defaults to the Onshape document name" maxLength={80} /></label>
               {kind === "lathe" && <>

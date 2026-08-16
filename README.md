@@ -12,6 +12,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Prefill the editable friendly name from the selected Onshape part for STEP and lathe requests.
 - Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel plus Aluminum 6061, 7075, and 5052; waterjet supports every listed DXF material.
 - Match explicit Onshape aluminum grades when available and default an unspecified aluminum material to the commonly used Aluminum 6061.
+- Refresh the editable part-name and material defaults when the selected part changes; inferred aluminum DXF parts default to waterjet cutting.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Keep the two lathe end-operation sections collapsible for smaller classroom screens.
 - Adopt face selections made while the panel is open, preserve compatible selections when switching processes, and reuse one selected face as Lathe End A.
