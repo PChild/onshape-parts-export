@@ -292,6 +292,15 @@ function readId(value: unknown, label: string): string {
   return id;
 }
 
+function readOnshapeSelectionId(value: unknown, label: string): string {
+  // Selection and occurrence identifiers are opaque Onshape values. Nested,
+  // configured, patterned, and replicated assembly instances can contain
+  // delimiters beyond the character set used by document/workspace IDs. They
+  // remain safe here because URL uses are encoded and request bodies are JSON
+  // serialized; readString still rejects empty values and control characters.
+  return readString(value, label, 4096);
+}
+
 function readPositiveDimension(value: unknown, label: string): number {
   const dimension = Number(value);
   if (!Number.isFinite(dimension) || dimension <= 0 || dimension > 100) {
@@ -330,11 +339,11 @@ function parseOnshapeSelection(value: unknown, index = 0): ExportBody["selection
   if (!entityType) throw new HttpError(400, `Selection ${index + 1} has an invalid type.`);
   return {
     entityType,
-    selectionId: readId(rawSelection.selectionId, `Selection ${index + 1} ID`),
-    partId: rawSelection.partId ? readId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
+    selectionId: readOnshapeSelectionId(rawSelection.selectionId, `Selection ${index + 1} ID`),
+    partId: rawSelection.partId ? readOnshapeSelectionId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
     occurrencePath: rawSelection.occurrencePath === undefined ? undefined
       : Array.isArray(rawSelection.occurrencePath) && rawSelection.occurrencePath.length
-        ? rawSelection.occurrencePath.map((id, pathIndex) => readId(id, `Selection ${index + 1} occurrence ${pathIndex + 1}`))
+        ? rawSelection.occurrencePath.map((id, pathIndex) => readOnshapeSelectionId(id, `Selection ${index + 1} occurrence ${pathIndex + 1}`))
         : (() => { throw new HttpError(400, `Selection ${index + 1} has an invalid occurrence path.`); })(),
     name: readOptionalString(rawSelection.name, `Selection ${index + 1} name`, 120),
   };
