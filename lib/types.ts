@@ -1,6 +1,33 @@
-export type ExportKind = "dxf" | "step";
-export type MachiningType = "laser" | "plasma" | "waterjet" | "3d printed";
-export type Material = "wood" | "aluminum" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+export type ExportKind = "dxf" | "step" | "lathe";
+export type MachiningType = "laser" | "plasma" | "waterjet" | "3d printed" | "lathe";
+export type Material = "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+export type LatheStockType =
+  | "1/2 true hex"
+  | "1/2 rounded hex"
+  | "3/8 true hex"
+  | "3/8 rounded hex"
+  | "round shaft"
+  | "round tube";
+export type LatheEndOperationType = "leave as modeled" | "turn down" | "tap" | "drill" | "other";
+
+export interface LatheEndOperation {
+  operation: LatheEndOperationType;
+  diameterInches?: number;
+  lengthInches?: number;
+  thread?: string;
+  depthInches?: number;
+  notes?: string;
+}
+
+export interface LatheDetails {
+  stockType: LatheStockType;
+  diameterInches?: number;
+  outerDiameterInches?: number;
+  innerDiameterInches?: number;
+  endA: LatheEndOperation;
+  endB: LatheEndOperation;
+  endReference?: string;
+}
 
 export interface OnshapeContext {
   documentId: string;
@@ -33,11 +60,13 @@ export interface ExportRequest {
   material?: Material;
   subsystem?: string;
   context: OnshapeContext;
-  selection: OnshapeSelection;
+  selections: OnshapeSelection[];
+  lathe?: LatheDetails;
 }
 
 export interface ExportResult {
   exportId: string;
-  storagePath: string;
-  fileName: string;
+  kind: ExportKind;
+  storagePath?: string;
+  fileName?: string;
 }

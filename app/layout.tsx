@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Shop Export",
+  title: "Parts Exporter",
   description: "Send Onshape parts and faces to the classroom manufacturing queue.",
 };
 

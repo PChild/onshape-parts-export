@@ -1,12 +1,14 @@
 # Shop Export for Onshape
 
-A classroom-focused Onshape right-panel extension that sends manufacturing files to Firebase:
+A classroom-focused Onshape right-panel extension that sends manufacturing files and manual machining requests to Firebase:
 
 - Select one planar face and export a DXF for laser, plasma, or waterjet cutting.
 - Select one solid part—or any face on that part—and export a STEP file for 3D printing.
-- Require a friendly name and quantity; DXF requests also require material and accept an optional subsystem.
-- Record the authenticated Onshape user with every file.
-- Store the file in Cloud Storage and a searchable audit record in Firestore.
+- Create a manual-lathe request without exporting a file by selecting its two planar end faces.
+- Require a friendly name and quantity; DXF and lathe requests also require material and accept an optional subsystem.
+- Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
+- Record the authenticated Onshape user with every export or manual request.
+- Store generated files in Cloud Storage and every manufacturing record in Firestore.
 - Follow the browser color scheme on first use, with a remembered light/dark override.
 
 ## Architecture
@@ -22,7 +24,7 @@ Onshape right panel (GitHub Pages)
 Firebase HTTPS function
     ├── Onshape OAuth and export API
     ├── Cloud Storage: manufacturing/{dxf|step}/YYYY-MM-DD/file
-    └── Firestore: exports/{exportId}
+    └── Firestore: exports/{exportId} (files and manual lathe requests)
 ```
 
 ## Prerequisites
@@ -123,6 +125,8 @@ The Storage object includes custom metadata for the request and the `exports/{ex
 - authenticated Onshape user ID, name, and email when available
 - file name, Storage path, MIME type, byte count, status, and server timestamp
 
+Lathe requests do not create a Storage object. Their material is limited to Aluminum 7075, Polycarb, Steel, or Carbon Fiber. Their Firestore record has `kind: "lathe"`, `machiningType: "lathe"`, a queued status, the resolved owning part ID, stock dimensions in inches, and the instructions for End A and End B.
+
 OAuth refresh tokens are stored only in the backend-only `onshapeSessions` collection. Firestore and Storage rules deny all direct browser access; Firebase Admin SDK calls from the function bypass those rules.
 
 OAuth opens inside the Onshape application pane. After connecting, the app stores an opaque session token in that pane's session storage. **Disconnect** deletes the corresponding backend session and removes the browser token.
@@ -131,6 +135,7 @@ OAuth opens inside the Onshape application pane. After connecting, the app store
 
 - DXF requests resolve the selected planar face with the Part Studio body-details API, then use Onshape's document DXF exporter with that face ID and its derived view plane.
 - STEP requests resolve a selected body or face to its owning Part Studio body, then use the Part Studio translation workflow with that deterministic part ID.
+- Lathe requests verify that the selected edge or faces belong to one Part Studio body. The app uses the known dimensions of fixed hex stock and asks for round-stock dimensions instead of guessing them from model topology.
 - Onshape may prepare exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
 - The function rejects exports above 250 MB and gives each file a collision-safe suffix.
 - If your enterprise uses a custom Onshape domain, the extension-provided `server` is preserved through OAuth and API calls. Only HTTPS `*.onshape.com` origins are accepted.

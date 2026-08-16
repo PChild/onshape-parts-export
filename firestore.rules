@@ -161,7 +161,7 @@ service cloud.firestore {
       allow write: if isCoach();
     }
 
-    // OAuth state, session credentials, and manufacturing export records are
+    // OAuth state, session credentials, and manufacturing request records are
     // written and managed only by the Admin SDK.
     match /oauthStates/{stateId} {
       allow read, write: if false;

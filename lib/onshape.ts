@@ -54,9 +54,11 @@ function firstString(record: UnknownRecord, keys: string[]): string | undefined 
   }
 }
 
-export function selectionFromMessage(data: unknown, allowedTypes: readonly ("FACE" | "BODY")[]): OnshapeSelection | null {
+type SelectionEntityType = OnshapeSelection["entityType"];
+
+export function selectionsFromMessage(data: unknown, allowedTypes: readonly SelectionEntityType[]): OnshapeSelection[] {
   const root = asRecord(data);
-  if (!root || root.messageName !== "SELECTION") return null;
+  if (!root || root.messageName !== "SELECTION") return [];
 
   const candidates: UnknownRecord[] = [];
   const selections = root.selections;
@@ -70,12 +72,13 @@ export function selectionFromMessage(data: unknown, allowedTypes: readonly ("FAC
   if (single) candidates.push(single);
   candidates.push(root);
 
+  const parsed: OnshapeSelection[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
     const declaredType = firstString(candidate, ["entityType", "entityTypeSpecifier"])?.toUpperCase();
     const selectionType = firstString(candidate, ["selectionType", "type"])?.toUpperCase();
     const candidateType = declaredType ?? selectionType;
-    const rawType = candidateType === "FACE"
-      ? "FACE"
+    const rawType: SelectionEntityType | undefined = candidateType === "FACE" ? "FACE"
       : candidateType === "BODY" || candidateType === "PART" || candidateType === "SOLID" ? "BODY" : undefined;
     if (rawType && !allowedTypes.includes(rawType)) continue;
     const selectionId = firstString(candidate, [
@@ -87,15 +90,22 @@ export function selectionFromMessage(data: unknown, allowedTypes: readonly ("FAC
     ]);
     if (!selectionId) continue;
     const entityType = rawType ?? (candidate.bodyType ? "BODY" : allowedTypes[0]);
-    if (!entityType) continue;
-    return {
+    if (!entityType || !allowedTypes.includes(entityType)) continue;
+    const key = `${entityType}:${selectionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parsed.push({
       entityType,
       selectionId,
       partId: firstString(candidate, ["partId", "idTag"]),
       name: firstString(candidate, ["name", "partName"]),
-    };
+    });
   }
-  return null;
+  return parsed;
+}
+
+export function selectionFromMessage(data: unknown, allowedTypes: readonly SelectionEntityType[]): OnshapeSelection | null {
+  return selectionsFromMessage(data, allowedTypes)[0] ?? null;
 }
 
 export function postToOnshape(context: OnshapeContext, message: UnknownRecord): void {

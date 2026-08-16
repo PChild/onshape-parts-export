@@ -24,8 +24,19 @@ const MAX_EXPORT_BYTES = 250 * 1024 * 1024;
 const EXPORT_RESULT_TIMEOUT_MS = 2 * 60 * 1000;
 const EXPORT_RESULT_POLL_MS = 1_000;
 
-type ExportKind = "dxf" | "step";
+type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
+type LatheStockType = "1/2 true hex" | "1/2 rounded hex" | "3/8 true hex" | "3/8 rounded hex" | "round shaft" | "round tube";
+type LatheEndOperationType = "leave as modeled" | "turn down" | "tap" | "drill" | "other";
+
+interface LatheEndOperation {
+  operation: LatheEndOperationType;
+  diameterInches?: number;
+  lengthInches?: number;
+  thread?: string;
+  depthInches?: number;
+  notes?: string;
+}
 
 interface TokenResponse {
   access_token: string;
@@ -47,8 +58,8 @@ interface ExportBody {
   kind: ExportKind;
   friendlyName: string;
   quantity: number;
-  machiningType: "laser" | "plasma" | "waterjet" | "3d printed";
-  material?: "wood" | "aluminum" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+  machiningType: "laser" | "plasma" | "waterjet" | "3d printed" | "lathe";
+  material?: "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
   subsystem?: string;
   context: {
     documentId: string;
@@ -59,11 +70,20 @@ interface ExportBody {
     configuration?: string;
     onshapeUserId?: string;
   };
-  selection: {
+  selections: Array<{
     entityType: SelectionType;
     selectionId: string;
     partId?: string;
     name?: string;
+  }>;
+  lathe?: {
+    stockType: LatheStockType;
+    diameterInches?: number;
+    outerDiameterInches?: number;
+    innerDiameterInches?: number;
+    endA: LatheEndOperation;
+    endB: LatheEndOperation;
+    endReference?: string;
   };
 }
 
@@ -220,29 +240,114 @@ function readId(value: unknown, label: string): string {
   return id;
 }
 
+function readPositiveDimension(value: unknown, label: string): number {
+  const dimension = Number(value);
+  if (!Number.isFinite(dimension) || dimension <= 0 || dimension > 100) {
+    throw new HttpError(400, `${label} must be greater than 0 and no more than 100 inches.`);
+  }
+  return dimension;
+}
+
+function parseLatheEnd(value: unknown, label: string): LatheEndOperation {
+  if (!value || typeof value !== "object") throw new HttpError(400, `${label} instructions are required.`);
+  const raw = value as Partial<LatheEndOperation>;
+  const validOperations: LatheEndOperationType[] = ["leave as modeled", "turn down", "tap", "drill", "other"];
+  if (!validOperations.includes(raw.operation as LatheEndOperationType)) throw new HttpError(400, `Choose a valid operation for ${label}.`);
+  const operation = raw.operation as LatheEndOperationType;
+  if (operation === "turn down") {
+    return {
+      operation,
+      diameterInches: readPositiveDimension(raw.diameterInches, `${label} target diameter`),
+      lengthInches: readPositiveDimension(raw.lengthInches, `${label} turned length`),
+    };
+  }
+  if (operation === "tap") {
+    return {
+      operation,
+      thread: readString(raw.thread, `${label} thread`, 40),
+      depthInches: readPositiveDimension(raw.depthInches, `${label} thread depth`),
+    };
+  }
+  if (operation === "drill") {
+    return {
+      operation,
+      diameterInches: readPositiveDimension(raw.diameterInches, `${label} hole diameter`),
+      depthInches: readPositiveDimension(raw.depthInches, `${label} hole depth`),
+    };
+  }
+  if (operation === "other") return { operation, notes: readString(raw.notes, `${label} instructions`, 300) };
+  return { operation };
+}
+
+function parseLatheDetails(value: unknown): NonNullable<ExportBody["lathe"]> {
+  if (!value || typeof value !== "object") throw new HttpError(400, "Lathe details are required.");
+  const raw = value as Partial<NonNullable<ExportBody["lathe"]>>;
+  const validStockTypes: LatheStockType[] = ["1/2 true hex", "1/2 rounded hex", "3/8 true hex", "3/8 rounded hex", "round shaft", "round tube"];
+  if (!validStockTypes.includes(raw.stockType as LatheStockType)) throw new HttpError(400, "Choose a valid lathe stock profile.");
+  const stockType = raw.stockType as LatheStockType;
+  const diameterInches = stockType === "round shaft" ? readPositiveDimension(raw.diameterInches, "Shaft diameter") : undefined;
+  const outerDiameterInches = stockType === "round tube" ? readPositiveDimension(raw.outerDiameterInches, "Tube outside diameter") : undefined;
+  const innerDiameterInches = stockType === "round tube" ? readPositiveDimension(raw.innerDiameterInches, "Tube inside diameter") : undefined;
+  if (outerDiameterInches !== undefined && innerDiameterInches !== undefined && innerDiameterInches >= outerDiameterInches) {
+    throw new HttpError(400, "Tube inside diameter must be smaller than its outside diameter.");
+  }
+  const endA = parseLatheEnd(raw.endA, "End A");
+  const endB = parseLatheEnd(raw.endB, "End B");
+  const endReference = readOptionalString(raw.endReference, "End identification", 300);
+  return {
+    stockType,
+    diameterInches,
+    outerDiameterInches,
+    innerDiameterInches,
+    endA,
+    endB,
+    endReference,
+  };
+}
+
 function parseExportBody(value: unknown): ExportBody {
   if (!value || typeof value !== "object") throw new HttpError(400, "A JSON request body is required.");
-  const body = value as Partial<ExportBody>;
+  const body = value as Partial<ExportBody> & { selection?: ExportBody["selections"][number] };
   const kind = body.kind;
-  if (kind !== "dxf" && kind !== "step") throw new HttpError(400, "Export type must be DXF or STEP.");
-  if (!body.context || !body.selection) {
-    throw new HttpError(400, `Select exactly one ${kind === "dxf" ? "face" : "part or face"}.`);
+  if (kind !== "dxf" && kind !== "step" && kind !== "lathe") throw new HttpError(400, "Choose DXF, STEP, or lathe.");
+  if (!body.context) throw new HttpError(400, "The Onshape document context is required.");
+  const lathe = kind === "lathe" ? parseLatheDetails(body.lathe) : undefined;
+  const rawSelections = Array.isArray(body.selections) ? body.selections : body.selection ? [body.selection] : [];
+  const selections = rawSelections.map((rawSelection, index) => {
+    if (!rawSelection || typeof rawSelection !== "object") throw new HttpError(400, `Selection ${index + 1} is invalid.`);
+    const rawSelectionType = String(rawSelection.entityType).toUpperCase();
+    const entityType: SelectionType | undefined = rawSelectionType === "FACE" ? "FACE"
+        : ["BODY", "PART", "SOLID"].includes(rawSelectionType) ? "BODY" : undefined;
+    if (!entityType) throw new HttpError(400, `Selection ${index + 1} has an invalid type.`);
+    return {
+      entityType,
+      selectionId: readId(rawSelection.selectionId, `Selection ${index + 1} ID`),
+      partId: rawSelection.partId ? readId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
+      name: readOptionalString(rawSelection.name, `Selection ${index + 1} name`, 120),
+    };
+  });
+  if (new Set(selections.map((selection) => selection.selectionId)).size !== selections.length) {
+    throw new HttpError(400, "Select distinct geometry for each selection.");
   }
-  const rawSelectionType = String(body.selection.entityType).toUpperCase();
-  const selectionType: SelectionType | undefined = rawSelectionType === "FACE"
-    ? "FACE"
-    : ["BODY", "PART", "SOLID"].includes(rawSelectionType) ? "BODY" : undefined;
-  if (!selectionType || (kind === "dxf" && selectionType !== "FACE")) {
-    throw new HttpError(400, `Select exactly one ${kind === "dxf" ? "face" : "part or face"}.`);
+  if (kind === "dxf" && (selections.length !== 1 || selections[0]?.entityType !== "FACE")) {
+    throw new HttpError(400, "Select exactly one face for a DXF export.");
+  }
+  if (kind === "step" && (selections.length !== 1 || !["BODY", "FACE"].includes(selections[0]?.entityType ?? ""))) {
+    throw new HttpError(400, "Select exactly one part or face for a STEP export.");
+  }
+  if (kind === "lathe" && (selections.length !== 2 || selections.some((selection) => selection.entityType !== "FACE"))) {
+    throw new HttpError(400, "Select exactly two end faces for the lathe part.");
   }
   const quantity = Number(body.quantity);
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) throw new HttpError(400, "Quantity must be between 1 and 999.");
-  const machining = kind === "step" ? "3d printed" : body.machiningType;
+  const machining = kind === "step" ? "3d printed" : kind === "lathe" ? "lathe" : body.machiningType;
   if (kind === "dxf" && !["laser", "plasma", "waterjet"].includes(String(machining))) {
     throw new HttpError(400, "Choose a valid machining type.");
   }
-  const validMaterials = ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"];
-  if (kind === "dxf" && !validMaterials.includes(String(body.material))) throw new HttpError(400, "Choose a valid material.");
+  const validDxfMaterials = ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"];
+  const validLatheMaterials = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
+  if (kind === "dxf" && !validDxfMaterials.includes(String(body.material))) throw new HttpError(400, "Choose a valid material.");
+  if (kind === "lathe" && !validLatheMaterials.includes(String(body.material))) throw new HttpError(400, "Choose Aluminum 7075, Polycarb, Steel, or Carbon Fiber for the lathe material.");
   const wv = body.context.workspaceOrVersion;
   if (wv !== "w" && wv !== "v") throw new HttpError(400, "Invalid workspace or version type.");
 
@@ -251,8 +356,8 @@ function parseExportBody(value: unknown): ExportBody {
     friendlyName: readString(body.friendlyName, "Friendly name", 80),
     quantity,
     machiningType: machining as ExportBody["machiningType"],
-    material: kind === "dxf" ? body.material : undefined,
-    subsystem: kind === "dxf" ? readOptionalString(body.subsystem, "Subsystem", 80) : undefined,
+    material: kind === "dxf" || kind === "lathe" ? body.material : undefined,
+    subsystem: kind === "dxf" || kind === "lathe" ? readOptionalString(body.subsystem, "Subsystem", 80) : undefined,
     context: {
       documentId: readId(body.context.documentId, "Document ID"),
       workspaceOrVersion: wv,
@@ -262,12 +367,8 @@ function parseExportBody(value: unknown): ExportBody {
       configuration: readOptionalOnshapeParameter(body.context.configuration, "Configuration", 2000),
       onshapeUserId: readOptionalString(body.context.onshapeUserId, "Onshape user ID", 128),
     },
-    selection: {
-      entityType: selectionType,
-      selectionId: readId(body.selection.selectionId, "Selection ID"),
-      partId: body.selection.partId ? readId(body.selection.partId, "Part ID") : undefined,
-      name: readOptionalString(body.selection.name, "Selection name", 120),
-    },
+    selections,
+    lathe,
   };
 }
 
@@ -369,9 +470,10 @@ async function selectedFaceView(
   version: string,
 ): Promise<string> {
   const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const selection = body.selections[0];
   const face = bodies
     .flatMap((part) => Array.isArray(part.faces) ? part.faces : [])
-    .find((candidate) => candidate.id === body.selection.selectionId);
+    .find((candidate) => candidate.id === selection.selectionId);
   if (!face) throw new HttpError(422, "The selected face no longer exists in the current Part Studio configuration.");
   if (face.surface?.type !== "PLANE") throw new HttpError(422, "Select a planar face for a DXF export.");
   const normal = normalizedVector(
@@ -388,14 +490,39 @@ async function selectedPartId(
   version: string,
 ): Promise<string> {
   const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
-  const selectedIds = new Set([body.selection.selectionId, body.selection.partId].filter((value): value is string => Boolean(value)));
+  const selection = body.selections[0];
+  const selectedIds = new Set([selection.selectionId, selection.partId].filter((value): value is string => Boolean(value)));
   const selectedBody = bodies.find((candidate) =>
     (typeof candidate.id === "string" && selectedIds.has(candidate.id))
     || candidate.faces?.some((face) => typeof face.id === "string" && selectedIds.has(face.id)),
   );
   if (typeof selectedBody?.id === "string" && selectedBody.id) return selectedBody.id;
-  if (body.selection.entityType === "BODY") return body.selection.partId ?? body.selection.selectionId;
+  if (selection.entityType === "BODY") return selection.partId ?? selection.selectionId;
   throw new HttpError(422, "The selected face no longer belongs to a part in the current Part Studio configuration.");
+}
+
+async function selectedLathePartId(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<string> {
+  const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  for (const selection of body.selections) {
+    if (selection.entityType !== "FACE") continue;
+    const face = bodies.flatMap((candidate) => candidate.faces ?? []).find((candidate) => candidate.id === selection.selectionId);
+    if (face?.surface?.type !== "PLANE") throw new HttpError(422, "Select planar end faces for round lathe stock.");
+  }
+  const owners = body.selections.map((selection) => bodies.find((candidate) =>
+    (typeof candidate.id === "string" && candidate.id === selection.partId)
+    || candidate.faces?.some((face) => face.id === selection.selectionId),
+  ));
+  if (owners.some((owner) => !owner || typeof owner.id !== "string" || !owner.id)) {
+    throw new HttpError(422, "Onshape could not find the part that owns the selected lathe geometry.");
+  }
+  const partIds = new Set(owners.map((owner) => owner!.id as string));
+  if (partIds.size !== 1) throw new HttpError(422, "All selected lathe geometry must belong to the same part.");
+  return [...partIds][0];
 }
 
 async function callOnshapeExport(body: ExportBody, session: StoredSession, sessionId: string): Promise<{ bytes: Buffer; contentType: string }> {
@@ -414,7 +541,7 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
       elementId,
       format: "DXF",
       destinationName: safeFileStem(body.friendlyName),
-      partIds: body.selection.selectionId,
+      partIds: body.selections[0].selectionId,
       view: await selectedFaceView(body, session, sessionId, version),
       version: "2018",
       flatten: true,
@@ -425,7 +552,7 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
       ...(workspaceOrVersion === "w" ? { workspaceId: workspaceOrVersionId } : { documentVersionId: workspaceOrVersionId }),
       ...(configuration ? { configuration } : {}),
     };
-  } else {
+  } else if (body.kind === "step") {
     endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
     payload = {
       formatName: "STEP",
@@ -434,6 +561,8 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
       translate: true,
       ...(configuration ? { configuration } : {}),
     };
+  } else {
+    throw new HttpError(400, "Lathe requests do not create an Onshape export file.");
   }
 
   let response = await authorizedOnshapeFetch(endpoint, {
@@ -633,8 +762,24 @@ async function disconnectSession(req: Request, res: Response): Promise<void> {
 async function handleExport(req: Request, res: Response): Promise<void> {
   const { id: sessionId, data: session } = await loadSession(req);
   const body = parseExportBody(req.body);
-  const { bytes, contentType } = await callOnshapeExport(body, session, sessionId);
   const exportId = db.collection("exports").doc().id;
+  if (body.kind === "lathe") {
+    if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
+    const version = apiVersion.value().replace(/^\//, "");
+    const partId = await selectedLathePartId(body, session, sessionId, version);
+    const requestMetadata = withoutUndefined(body) as Record<string, unknown>;
+    await db.collection("exports").doc(exportId).set({
+      ...requestMetadata,
+      partId,
+      requestedBy: session.user,
+      sessionId,
+      status: "queued",
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    res.status(201).json({ exportId, kind: body.kind });
+    return;
+  }
+  const { bytes, contentType } = await callOnshapeExport(body, session, sessionId);
   const extension = body.kind;
   const fileName = `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}.${extension}`;
   const dateFolder = new Date().toISOString().slice(0, 10);
@@ -649,7 +794,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     onshapeUserName: session.user.name,
     documentId: body.context.documentId,
     elementId: body.context.elementId,
-    selectionId: body.selection.selectionId,
+    selectionId: body.selections[0].selectionId,
     ...(body.material ? { material: body.material } : {}),
     ...(body.subsystem ? { subsystem: body.subsystem } : {}),
   };
@@ -670,7 +815,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     status: "complete",
     createdAt: FieldValue.serverTimestamp(),
   });
-  res.status(201).json({ exportId, storagePath, fileName });
+  res.status(201).json({ exportId, kind: body.kind, storagePath, fileName });
 }
 
 async function handler(req: Request, res: Response): Promise<void> {
