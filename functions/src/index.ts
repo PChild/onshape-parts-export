@@ -496,18 +496,74 @@ interface OnshapeAssemblyInstance {
   isStandardContent?: unknown;
 }
 
+interface OnshapeAssemblyContainer {
+  documentId?: unknown;
+  documentMicroversion?: unknown;
+  documentVersion?: unknown;
+  elementId?: unknown;
+  configuration?: unknown;
+  fullConfiguration?: unknown;
+  instances?: OnshapeAssemblyInstance[];
+  occurrences?: Array<{ path?: unknown }>;
+}
+
 interface OnshapeAssemblyDefinition {
-  rootAssembly?: { instances?: OnshapeAssemblyInstance[] };
-  subAssemblies?: Array<{ instances?: OnshapeAssemblyInstance[] }>;
+  rootAssembly?: OnshapeAssemblyContainer;
+  subAssemblies?: OnshapeAssemblyContainer[];
+}
+
+type OnshapeAssemblySource = OnshapeAssemblyInstance | OnshapeAssemblyContainer;
+
+function assemblySourceRevision(source: OnshapeAssemblySource): string | undefined {
+  if (typeof source.documentMicroversion === "string" && source.documentMicroversion) return `m:${source.documentMicroversion}`;
+  if (typeof source.documentVersion === "string" && source.documentVersion) return `v:${source.documentVersion}`;
+  return undefined;
+}
+
+function assemblySourceConfiguration(source: OnshapeAssemblySource): string {
+  return String(source.fullConfiguration ?? source.configuration ?? "");
+}
+
+function assemblyElementSourceKey(source: OnshapeAssemblySource): string | undefined {
+  if (typeof source.documentId !== "string" || typeof source.elementId !== "string") return undefined;
+  const revision = assemblySourceRevision(source);
+  return revision ? `${source.documentId}:${revision}:${source.elementId}:${assemblySourceConfiguration(source)}` : undefined;
 }
 
 function assemblyInstanceSourceKey(instance: OnshapeAssemblyInstance): string | undefined {
-  if (typeof instance.documentId !== "string" || typeof instance.elementId !== "string" || typeof instance.partId !== "string") return undefined;
-  const revisionId = typeof instance.documentVersion === "string" && instance.documentVersion
-    ? `v:${instance.documentVersion}`
-    : typeof instance.documentMicroversion === "string" && instance.documentMicroversion
-      ? `m:${instance.documentMicroversion}` : undefined;
-  return revisionId ? `${instance.documentId}:${revisionId}:${instance.elementId}:${instance.partId}:${String(instance.fullConfiguration ?? instance.configuration ?? "")}` : undefined;
+  if (typeof instance.partId !== "string") return undefined;
+  const elementKey = assemblyElementSourceKey(instance);
+  return elementKey ? `${elementKey}:${instance.partId}` : undefined;
+}
+
+function sameAssemblyElementSource(instance: OnshapeAssemblyInstance, assembly: OnshapeAssemblyContainer): boolean {
+  if (instance.documentId !== assembly.documentId || instance.elementId !== assembly.elementId) return false;
+  const instanceMicroversion = typeof instance.documentMicroversion === "string" ? instance.documentMicroversion : undefined;
+  const assemblyMicroversion = typeof assembly.documentMicroversion === "string" ? assembly.documentMicroversion : undefined;
+  if (instanceMicroversion && assemblyMicroversion && instanceMicroversion !== assemblyMicroversion) return false;
+  const instanceVersion = typeof instance.documentVersion === "string" ? instance.documentVersion : undefined;
+  const assemblyVersion = typeof assembly.documentVersion === "string" ? assembly.documentVersion : undefined;
+  if (!instanceMicroversion && !assemblyMicroversion && instanceVersion && assemblyVersion && instanceVersion !== assemblyVersion) return false;
+  return assemblySourceConfiguration(instance) === assemblySourceConfiguration(assembly);
+}
+
+function partInstanceAtOccurrencePath(
+  definition: OnshapeAssemblyDefinition,
+  occurrencePath: string[],
+): OnshapeAssemblyInstance | undefined {
+  let assembly: OnshapeAssemblyContainer | undefined = definition.rootAssembly;
+  if (!assembly) return undefined;
+  for (let index = 0; index < occurrencePath.length; index += 1) {
+    const instance: OnshapeAssemblyInstance | undefined = assembly.instances?.find(
+      (candidate: OnshapeAssemblyInstance): boolean => candidate.id === occurrencePath[index],
+    );
+    if (!instance) return undefined;
+    if (index === occurrencePath.length - 1) return instance.type === "Part" ? instance : undefined;
+    if (instance.type !== "Assembly") return undefined;
+    assembly = definition.subAssemblies?.find((candidate) => sameAssemblyElementSource(instance, candidate));
+    if (!assembly) return undefined;
+  }
+  return undefined;
 }
 
 async function resolveAssemblySelections(
@@ -531,6 +587,7 @@ async function resolveAssemblySelections(
     throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not inspect the current assembly. ${detail}`.trim());
   }
   const definition = await response.json().catch(() => null) as OnshapeAssemblyDefinition | null;
+  if (!definition?.rootAssembly) throw new HttpError(502, "Onshape returned an invalid assembly definition.");
   const instances = [
     ...(Array.isArray(definition?.rootAssembly?.instances) ? definition.rootAssembly.instances : []),
     ...(Array.isArray(definition?.subAssemblies) ? definition.subAssemblies.flatMap((assembly) => Array.isArray(assembly.instances) ? assembly.instances : []) : []),
@@ -538,22 +595,25 @@ async function resolveAssemblySelections(
   if (!instances.length) throw new HttpError(422, "The assembly contains no supported Part Studio instances.");
 
   const selectedInstances = selections.map((selection, index) => {
+    const occurrenceInstance = selection.occurrencePath
+      ? partInstanceAtOccurrencePath(definition, selection.occurrencePath)
+      : undefined;
+    if (occurrenceInstance && occurrenceInstance.isStandardContent !== true) return occurrenceInstance;
     const leafOccurrenceId = selection.occurrencePath?.at(-1);
-    const exactInstance = instances.find((instance) =>
-      (leafOccurrenceId && instance.id === leafOccurrenceId)
-      || (selection.entityType === "BODY" && instance.id === selection.selectionId),
-    );
-    if (exactInstance) return exactInstance;
     const candidates = instances.filter((instance) =>
-      (selection.partId && instance.partId === selection.partId)
+      (leafOccurrenceId && instance.id === leafOccurrenceId)
+      || (selection.entityType === "BODY" && instance.id === selection.selectionId)
+      || (selection.partId && instance.partId === selection.partId)
       || instance.partId === selection.selectionId,
     );
     const sourceKeys = new Set(candidates.map(assemblyInstanceSourceKey).filter(Boolean));
     if (candidates.length && sourceKeys.size === 1) return candidates[0];
     throw new HttpError(422, `Onshape could not resolve selection ${index + 1} to one assembly part instance.`);
   });
-  const selectedInstanceIds = new Set(selectedInstances.map((instance) => instance.id).filter(Boolean));
-  if (selections.length > 1 && selectedInstanceIds.size > 1) {
+  const selectedOccurrenceKeys = new Set(selections.map((selection, index) =>
+    selection.occurrencePath?.join("/") ?? String(selectedInstances[index].id ?? ""),
+  ));
+  if (selections.length > 1 && selectedOccurrenceKeys.size > 1) {
     throw new HttpError(422, "Select all required faces from the same assembly part instance.");
   }
   const selectedSourceKeys = selectedInstances.map(assemblyInstanceSourceKey);
@@ -564,13 +624,13 @@ async function resolveAssemblySelections(
   if (typeof instance.documentId !== "string" || typeof instance.elementId !== "string" || typeof instance.partId !== "string") {
     throw new HttpError(422, "Onshape returned incomplete source information for the selected assembly part.");
   }
-  const documentVersion = typeof instance.documentVersion === "string" && instance.documentVersion ? instance.documentVersion : undefined;
   const documentMicroversion = typeof instance.documentMicroversion === "string" && instance.documentMicroversion ? instance.documentMicroversion : undefined;
+  const documentVersion = typeof instance.documentVersion === "string" && instance.documentVersion ? instance.documentVersion : undefined;
   if (!documentVersion && !documentMicroversion) throw new HttpError(422, "Onshape did not identify the selected part's source version.");
   const sourceContext: ExportBody["context"] = {
     documentId: instance.documentId,
-    workspaceOrVersion: documentVersion ? "v" : "m",
-    workspaceOrVersionId: documentVersion ?? documentMicroversion!,
+    workspaceOrVersion: documentMicroversion ? "m" : "v",
+    workspaceOrVersionId: documentMicroversion ?? documentVersion!,
     elementId: instance.elementId,
     server: context.server,
     configuration: cleanSuggestion(instance.fullConfiguration, 2000) ?? cleanSuggestion(instance.configuration, 2000),
