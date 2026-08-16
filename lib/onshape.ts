@@ -19,17 +19,25 @@ function normalizeOrigin(value: string | null): string {
 
 export function readOnshapeContext(url: URL): OnshapeContext | null {
   const p = url.searchParams;
-  const pathMatch = url.pathname.match(/\/documents\/([^/]+)\/(w|v)\/([^/]+)\/e\/([^/]+)/);
+  const pathMatch = url.pathname.match(/\/documents\/([^/]+)\/(w|v|m)\/([^/]+)\/e\/([^/]+)/);
   const documentId = resolvedParameter(p.get("documentId")) ?? pathMatch?.[1] ?? "";
   const explicitWv = resolvedParameter(p.get("workspaceOrVersion"));
-  const workspaceOrVersion = explicitWv === "v" || (!explicitWv && Boolean(resolvedParameter(p.get("versionId")))) ? "v" : "w";
+  const workspaceOrVersion = explicitWv === "v" || explicitWv === "m" || explicitWv === "w"
+    ? explicitWv
+    : resolvedParameter(p.get("microversionId")) ? "m"
+      : resolvedParameter(p.get("versionId")) ? "v"
+        : pathMatch?.[2] === "v" || pathMatch?.[2] === "m" ? pathMatch[2] : "w";
   const workspaceOrVersionId =
     resolvedParameter(p.get("workspaceOrVersionId")) ??
-    (workspaceOrVersion === "v" ? resolvedParameter(p.get("versionId")) : resolvedParameter(p.get("workspaceId"))) ??
+    (workspaceOrVersion === "m" ? resolvedParameter(p.get("microversionId"))
+      : workspaceOrVersion === "v" ? resolvedParameter(p.get("versionId"))
+        : resolvedParameter(p.get("workspaceId"))) ??
     pathMatch?.[3] ??
     "";
   const tabElementId = resolvedParameter(p.get("tabElementId"));
   const elementId = resolvedParameter(p.get("elementId")) ?? tabElementId ?? pathMatch?.[4] ?? "";
+  const rawContextType = resolvedParameter(p.get("contextType"));
+  const contextType = rawContextType === "assembly" || rawContextType === "partstudio" ? rawContextType : undefined;
 
   if (!documentId || !workspaceOrVersionId || !elementId) return null;
 
@@ -39,6 +47,7 @@ export function readOnshapeContext(url: URL): OnshapeContext | null {
     workspaceOrVersionId,
     elementId,
     tabElementId,
+    contextType,
     server: normalizeOrigin(p.get("server")),
     configuration: resolvedParameter(p.get("configuration")),
     onshapeUserId: resolvedParameter(p.get("userId")),
@@ -53,6 +62,25 @@ function firstString(record: UnknownRecord, keys: string[]): string | undefined 
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) return value;
+  }
+}
+
+function firstStringArray(record: UnknownRecord, keys: string[]): string[] | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      const strings = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+      if (strings.length === value.length && strings.length) return strings;
+    }
+    if (typeof value === "string" && value.trim()) {
+      const clean = value.trim();
+      try {
+        const parsed = JSON.parse(clean) as unknown;
+        if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string" && item.trim())) return parsed;
+      } catch {}
+      const parts = clean.split(/[,/]/).map((item) => item.trim()).filter(Boolean);
+      if (parts.length) return parts;
+    }
   }
 }
 
@@ -100,6 +128,9 @@ export function selectionsFromMessage(data: unknown, allowedTypes: readonly Sele
       entityType,
       selectionId,
       partId: firstString(candidate, ["partId", "bodyId", "idTag"]),
+      occurrencePath: firstStringArray(candidate, ["occurrencePath", "occurrence", "path"])
+        ?? firstStringArray(asRecord(candidate.occurrence) ?? {}, ["path"])
+        ?? firstStringArray(root, ["occurrencePath", "occurrence", "path"]),
       name: firstString(candidate, ["name", "partName"]),
     });
   }

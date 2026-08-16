@@ -108,14 +108,20 @@ Add a Part Studio extension to the OAuth application with:
 - Action URL:
 
 ```text
-https://GITHUB_USER.github.io/REPOSITORY/?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&tabElementId={$tabElementId}&elementId={$elementId}&configuration={$configuration}
+https://GITHUB_USER.github.io/REPOSITORY/?contextType=partstudio&documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}
 ```
 
 Onshape supplies `server` and `userId` as default query parameters. The app validates `postMessage` events against that `server` origin before accepting selections.
 
-To use the exporter from assemblies, add a second **Element right panel** extension with the **Part**, **Selected part**, or **Selected instance** context offered by your Onshape account. Use the same action URL. Select a part instance in the assembly, then open this version of the exporter. In that context, `tabElementId` identifies the assembly tab used for selection messages while `elementId` identifies the source Part Studio used for geometry and export API calls. Keep the original **Part Studio** extension as well so the panel remains available when no assembly instance is selected.
+To keep the exporter visible before students select anything in an assembly, add a second **Element right panel** extension with the **Assembly** context. Use this action URL:
 
-This path is intended for ordinary Part Studio instances. Linked parts from another document may need additional source-version handling if Onshape does not supply their source document context in the extension URL.
+```text
+https://GITHUB_USER.github.io/REPOSITORY/?contextType=assembly&documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}
+```
+
+Open that panel first, then use its normal **Select face**, **Select part or face**, or **Select two faces** button. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
+
+Standard Content instances are not currently supported because they do not have an ordinary source Part Studio export context.
 
 ## 5. Deploy the UI to GitHub Pages
 

@@ -424,7 +424,7 @@ export function ExportApp() {
 
         {!context && (
           <div className="notice warning">
-            <strong>Open this app from an Onshape Part Studio or selected assembly part.</strong>
+            <strong>Open this app from an Onshape Part Studio or Assembly.</strong>
             <span>The source document, workspace, or element IDs are missing from the URL.</span>
           </div>
         )}

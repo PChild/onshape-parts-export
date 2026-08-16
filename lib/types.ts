@@ -31,10 +31,11 @@ export interface LatheDetails {
 
 export interface OnshapeContext {
   documentId: string;
-  workspaceOrVersion: "w" | "v";
+  workspaceOrVersion: "w" | "v" | "m";
   workspaceOrVersionId: string;
   elementId: string;
   tabElementId?: string;
+  contextType?: "partstudio" | "assembly";
   server: string;
   configuration?: string;
   onshapeUserId?: string;
@@ -44,6 +45,7 @@ export interface OnshapeSelection {
   entityType: "FACE" | "BODY";
   selectionId: string;
   partId?: string;
+  occurrencePath?: string[];
   name?: string;
 }
 

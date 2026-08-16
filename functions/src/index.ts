@@ -69,10 +69,11 @@ interface ExportBody {
   subsystem?: string;
   context: {
     documentId: string;
-    workspaceOrVersion: "w" | "v";
+    workspaceOrVersion: "w" | "v" | "m";
     workspaceOrVersionId: string;
     elementId: string;
     tabElementId?: string;
+    contextType?: "partstudio" | "assembly";
     server: string;
     configuration?: string;
     onshapeUserId?: string;
@@ -81,6 +82,7 @@ interface ExportBody {
     entityType: SelectionType;
     selectionId: string;
     partId?: string;
+    occurrencePath?: string[];
     name?: string;
   }>;
   lathe?: {
@@ -259,13 +261,17 @@ function parseOnshapeContext(value: unknown): ExportBody["context"] {
   if (!value || typeof value !== "object") throw new HttpError(400, "The Onshape document context is required.");
   const context = value as Partial<ExportBody["context"]>;
   const workspaceOrVersion = context.workspaceOrVersion;
-  if (workspaceOrVersion !== "w" && workspaceOrVersion !== "v") throw new HttpError(400, "Invalid workspace or version type.");
+  if (workspaceOrVersion !== "w" && workspaceOrVersion !== "v" && workspaceOrVersion !== "m") throw new HttpError(400, "Invalid workspace, version, or microversion type.");
+  if (context.contextType !== undefined && context.contextType !== "partstudio" && context.contextType !== "assembly") {
+    throw new HttpError(400, "Invalid Onshape context type.");
+  }
   return {
     documentId: readId(context.documentId, "Document ID"),
     workspaceOrVersion,
     workspaceOrVersionId: readId(context.workspaceOrVersionId, "Workspace or version ID"),
     elementId: readId(context.elementId, "Element ID"),
     tabElementId: context.tabElementId ? readId(context.tabElementId, "Current tab element ID") : undefined,
+    contextType: context.contextType,
     server: safeOnshapeOrigin(context.server),
     configuration: readOptionalOnshapeParameter(context.configuration, "Configuration", 2000),
     onshapeUserId: readOptionalString(context.onshapeUserId, "Onshape user ID", 128),
@@ -283,6 +289,10 @@ function parseOnshapeSelection(value: unknown, index = 0): ExportBody["selection
     entityType,
     selectionId: readId(rawSelection.selectionId, `Selection ${index + 1} ID`),
     partId: rawSelection.partId ? readId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
+    occurrencePath: rawSelection.occurrencePath === undefined ? undefined
+      : Array.isArray(rawSelection.occurrencePath) && rawSelection.occurrencePath.length
+        ? rawSelection.occurrencePath.map((id, pathIndex) => readId(id, `Selection ${index + 1} occurrence ${pathIndex + 1}`))
+        : (() => { throw new HttpError(400, `Selection ${index + 1} has an invalid occurrence path.`); })(),
     name: readOptionalString(rawSelection.name, `Selection ${index + 1} name`, 120),
   };
 }
@@ -446,6 +456,112 @@ interface OnshapePartInfo {
     id?: unknown;
     libraryName?: unknown;
   } | null;
+}
+
+interface OnshapeAssemblyInstance {
+  id?: unknown;
+  type?: unknown;
+  name?: unknown;
+  partId?: unknown;
+  documentId?: unknown;
+  documentMicroversion?: unknown;
+  documentVersion?: unknown;
+  elementId?: unknown;
+  configuration?: unknown;
+  fullConfiguration?: unknown;
+  isStandardContent?: unknown;
+}
+
+interface OnshapeAssemblyDefinition {
+  rootAssembly?: { instances?: OnshapeAssemblyInstance[] };
+  subAssemblies?: Array<{ instances?: OnshapeAssemblyInstance[] }>;
+}
+
+function assemblyInstanceSourceKey(instance: OnshapeAssemblyInstance): string | undefined {
+  if (typeof instance.documentId !== "string" || typeof instance.elementId !== "string" || typeof instance.partId !== "string") return undefined;
+  const revisionId = typeof instance.documentVersion === "string" && instance.documentVersion
+    ? `v:${instance.documentVersion}`
+    : typeof instance.documentMicroversion === "string" && instance.documentMicroversion
+      ? `m:${instance.documentMicroversion}` : undefined;
+  return revisionId ? `${instance.documentId}:${revisionId}:${instance.elementId}:${instance.partId}:${String(instance.fullConfiguration ?? instance.configuration ?? "")}` : undefined;
+}
+
+async function resolveAssemblySelections(
+  context: ExportBody["context"],
+  selections: ExportBody["selections"],
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<{ context: ExportBody["context"]; selections: ExportBody["selections"] }> {
+  if (context.contextType !== "assembly") return { context, selections };
+  const endpoint = new URL(
+    `${session.server}/api/${version}/assemblies/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
+  );
+  if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+  const response = await authorizedOnshapeFetch(endpoint.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  }, session, sessionId);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 400);
+    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not inspect the current assembly. ${detail}`.trim());
+  }
+  const definition = await response.json().catch(() => null) as OnshapeAssemblyDefinition | null;
+  const instances = [
+    ...(Array.isArray(definition?.rootAssembly?.instances) ? definition.rootAssembly.instances : []),
+    ...(Array.isArray(definition?.subAssemblies) ? definition.subAssemblies.flatMap((assembly) => Array.isArray(assembly.instances) ? assembly.instances : []) : []),
+  ].filter((instance) => instance.type === "Part" && instance.isStandardContent !== true);
+  if (!instances.length) throw new HttpError(422, "The assembly contains no supported Part Studio instances.");
+
+  const selectedInstances = selections.map((selection, index) => {
+    const leafOccurrenceId = selection.occurrencePath?.at(-1);
+    const exactInstance = instances.find((instance) =>
+      (leafOccurrenceId && instance.id === leafOccurrenceId)
+      || (selection.entityType === "BODY" && instance.id === selection.selectionId),
+    );
+    if (exactInstance) return exactInstance;
+    const candidates = instances.filter((instance) =>
+      (selection.partId && instance.partId === selection.partId)
+      || instance.partId === selection.selectionId,
+    );
+    const sourceKeys = new Set(candidates.map(assemblyInstanceSourceKey).filter(Boolean));
+    if (candidates.length && sourceKeys.size === 1) return candidates[0];
+    throw new HttpError(422, `Onshape could not resolve selection ${index + 1} to one assembly part instance.`);
+  });
+  const selectedInstanceIds = new Set(selectedInstances.map((instance) => instance.id).filter(Boolean));
+  if (selections.length > 1 && selectedInstanceIds.size > 1) {
+    throw new HttpError(422, "Select all required faces from the same assembly part instance.");
+  }
+  const selectedSourceKeys = selectedInstances.map(assemblyInstanceSourceKey);
+  if (selectedSourceKeys.some((key) => !key)) throw new HttpError(422, "Onshape returned incomplete source information for the selected assembly part.");
+  const sourceKeys = new Set(selectedSourceKeys);
+  if (sourceKeys.size !== 1) throw new HttpError(422, "All selected geometry must resolve to the same source part.");
+  const instance = selectedInstances[0];
+  if (typeof instance.documentId !== "string" || typeof instance.elementId !== "string" || typeof instance.partId !== "string") {
+    throw new HttpError(422, "Onshape returned incomplete source information for the selected assembly part.");
+  }
+  const documentVersion = typeof instance.documentVersion === "string" && instance.documentVersion ? instance.documentVersion : undefined;
+  const documentMicroversion = typeof instance.documentMicroversion === "string" && instance.documentMicroversion ? instance.documentMicroversion : undefined;
+  if (!documentVersion && !documentMicroversion) throw new HttpError(422, "Onshape did not identify the selected part's source version.");
+  const sourceContext: ExportBody["context"] = {
+    documentId: instance.documentId,
+    workspaceOrVersion: documentVersion ? "v" : "m",
+    workspaceOrVersionId: documentVersion ?? documentMicroversion!,
+    elementId: instance.elementId,
+    server: context.server,
+    configuration: cleanSuggestion(instance.fullConfiguration, 2000) ?? cleanSuggestion(instance.configuration, 2000),
+    contextType: "partstudio",
+    onshapeUserId: context.onshapeUserId,
+  };
+  return {
+    context: sourceContext,
+    selections: selections.map((selection, index) => ({
+      ...selection,
+      selectionId: selection.entityType === "BODY" ? selectedInstances[index].partId as string : selection.selectionId,
+      partId: selectedInstances[index].partId as string,
+      name: selection.name ?? (typeof selectedInstances[index].name === "string" ? selectedInstances[index].name : undefined),
+    })),
+  };
 }
 
 function suggestedDxfMaterial(...values: unknown[]): DxfMaterial | undefined {
@@ -746,7 +862,8 @@ async function callOnshapeExport(
       storeInDocument: false,
       triggerAutoDownload: true,
       zipSingleFileOutput: false,
-      ...(workspaceOrVersion === "w" ? { workspaceId: workspaceOrVersionId } : { documentVersionId: workspaceOrVersionId }),
+      ...(workspaceOrVersion === "w" ? { workspaceId: workspaceOrVersionId } : {}),
+      ...(workspaceOrVersion === "v" ? { documentVersionId: workspaceOrVersionId } : {}),
       ...(configuration ? { configuration } : {}),
     };
   } else if (body.kind === "step") {
@@ -982,13 +1099,16 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
   });
 
   const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string }> => {
-    const bodies = await getPartStudioBodyDetails({ context }, session, sessionId, version);
-    const partId = partIdForSelection(bodies, selection);
+    const resolved = await resolveAssemblySelections(context, [selection], session, sessionId, version);
+    const sourceContext = resolved.context;
+    const sourceSelection = resolved.selections[0];
+    const bodies = await getPartStudioBodyDetails({ context: sourceContext }, session, sessionId, version);
+    const partId = partIdForSelection(bodies, sourceSelection);
     if (!partId) return {};
     const endpoint = new URL(
-      `${session.server}/api/${version}/parts/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
+      `${session.server}/api/${version}/parts/d/${encodeURIComponent(sourceContext.documentId)}/${sourceContext.workspaceOrVersion}/${encodeURIComponent(sourceContext.workspaceOrVersionId)}/e/${encodeURIComponent(sourceContext.elementId)}`,
     );
-    if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+    if (sourceContext.configuration) endpoint.searchParams.set("configuration", sourceContext.configuration);
     const response = await authorizedOnshapeFetch(endpoint.toString(), {
       method: "GET",
       headers: { Accept: "application/json" },
@@ -1011,11 +1131,14 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
 
 async function handleExport(req: Request, res: Response): Promise<void> {
   const { id: sessionId, data: session } = await loadSession(req);
-  const body = parseExportBody(req.body);
+  const submittedBody = parseExportBody(req.body);
+  if (submittedBody.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
+  const version = apiVersion.value().replace(/^\//, "");
+  const resolved = await resolveAssemblySelections(submittedBody.context, submittedBody.selections, session, sessionId, version);
+  const body: ExportBody = { ...submittedBody, context: resolved.context, selections: resolved.selections };
+  const assemblyContext = submittedBody.context.contextType === "assembly" ? submittedBody.context : undefined;
   const exportId = db.collection("exports").doc().id;
   if (body.kind === "lathe") {
-    if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
-    const version = apiVersion.value().replace(/^\//, "");
     const { partId, overallLengthInches } = await selectedLathePartDetails(body, session, sessionId, version);
     const preview = await getPartPreview(body, session, sessionId, version, partId, ISOMETRIC_VIEW_MATRIX).catch((error: unknown) => {
       console.error("Could not create Onshape lathe preview.", error);
@@ -1041,7 +1164,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
         },
       });
     }
-    const requestMetadata = withoutUndefined(body) as Record<string, unknown>;
+    const requestMetadata = withoutUndefined({ ...body, assemblyContext }) as Record<string, unknown>;
     await db.collection("exports").doc(exportId).set({
       ...requestMetadata,
       partId,
@@ -1063,7 +1186,6 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     res.status(201).json({ exportId, kind: body.kind, previewStoragePath });
     return;
   }
-  const version = apiVersion.value().replace(/^\//, "");
   const bodyDetails = await getPartStudioBodyDetails(body, session, sessionId, version);
   const partId = await selectedPartId(body, session, sessionId, version, bodyDetails);
   const faceView = body.kind === "dxf"
@@ -1123,7 +1245,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     }));
   }
   await Promise.all(uploads);
-  const exportRequestMetadata = withoutUndefined(body) as Record<string, unknown>;
+  const exportRequestMetadata = withoutUndefined({ ...body, assemblyContext }) as Record<string, unknown>;
   await db.collection("exports").doc(exportId).set({
     ...exportRequestMetadata,
     partId,
