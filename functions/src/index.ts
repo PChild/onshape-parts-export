@@ -529,9 +529,19 @@ interface OnshapeAssemblyContainer {
 interface OnshapeAssemblyDefinition {
   rootAssembly?: OnshapeAssemblyContainer;
   subAssemblies?: OnshapeAssemblyContainer[];
+  parts?: OnshapeAssemblyInstance[];
 }
 
 type OnshapeAssemblySource = OnshapeAssemblyInstance | OnshapeAssemblyContainer;
+
+interface ResolvedSelections {
+  context: ExportBody["context"];
+  selections: ExportBody["selections"];
+  exportTarget: {
+    context: ExportBody["context"];
+    occurrencePath?: string[];
+  };
+}
 
 function assemblySourceRevision(source: OnshapeAssemblySource): string | undefined {
   if (typeof source.documentMicroversion === "string" && source.documentMicroversion) return `m:${source.documentMicroversion}`;
@@ -555,7 +565,7 @@ function assemblyInstanceSourceKey(instance: OnshapeAssemblyInstance): string | 
   return elementKey ? `${elementKey}:${instance.partId}` : undefined;
 }
 
-function sameAssemblyElementSource(instance: OnshapeAssemblyInstance, assembly: OnshapeAssemblyContainer): boolean {
+function sameAssemblyElementRevision(instance: OnshapeAssemblyInstance, assembly: OnshapeAssemblyContainer): boolean {
   if (instance.documentId !== assembly.documentId || instance.elementId !== assembly.elementId) return false;
   const instanceMicroversion = typeof instance.documentMicroversion === "string" ? instance.documentMicroversion : undefined;
   const assemblyMicroversion = typeof assembly.documentMicroversion === "string" ? assembly.documentMicroversion : undefined;
@@ -563,24 +573,97 @@ function sameAssemblyElementSource(instance: OnshapeAssemblyInstance, assembly: 
   const instanceVersion = typeof instance.documentVersion === "string" ? instance.documentVersion : undefined;
   const assemblyVersion = typeof assembly.documentVersion === "string" ? assembly.documentVersion : undefined;
   if (!instanceMicroversion && !assemblyMicroversion && instanceVersion && assemblyVersion && instanceVersion !== assemblyVersion) return false;
-  return assemblySourceConfiguration(instance) === assemblySourceConfiguration(assembly);
+  return true;
 }
 
-function partInstanceAtOccurrencePath(
+function partInstancesAtOccurrencePath(
   definition: OnshapeAssemblyDefinition,
   occurrencePath: string[],
-): OnshapeAssemblyInstance | undefined {
-  let assembly: OnshapeAssemblyContainer | undefined = definition.rootAssembly;
-  if (!assembly) return undefined;
-  for (let index = 0; index < occurrencePath.length; index += 1) {
-    const instance: OnshapeAssemblyInstance | undefined = assembly.instances?.find(
-      (candidate: OnshapeAssemblyInstance): boolean => candidate.id === occurrencePath[index],
-    );
-    if (!instance) return undefined;
-    if (index === occurrencePath.length - 1) return instance.type === "Part" ? instance : undefined;
-    if (instance.type !== "Assembly") return undefined;
-    assembly = definition.subAssemblies?.find((candidate) => sameAssemblyElementSource(instance, candidate));
-    if (!assembly) return undefined;
+): OnshapeAssemblyInstance[] {
+  if (!definition.rootAssembly || !occurrencePath.length) return [];
+  const walk = (assembly: OnshapeAssemblyContainer, index: number): OnshapeAssemblyInstance[] => {
+    const instances = (assembly.instances ?? []).filter((candidate) => candidate.id === occurrencePath[index]);
+    if (index === occurrencePath.length - 1) {
+      return instances.filter((instance) => String(instance.type).toLowerCase() === "part");
+    }
+    const results: OnshapeAssemblyInstance[] = [];
+    for (const instance of instances) {
+      if (String(instance.type).toLowerCase() !== "assembly") continue;
+      const compatible = (definition.subAssemblies ?? []).filter((candidate) => sameAssemblyElementRevision(instance, candidate));
+      const exactConfiguration = compatible.filter((candidate) =>
+        assemblySourceConfiguration(instance) === assemblySourceConfiguration(candidate),
+      );
+      const preferred = exactConfiguration.length ? exactConfiguration : compatible;
+      let nested = preferred.flatMap((candidate) => walk(candidate, index + 1));
+      // Some configured and flexible subassemblies report equivalent source
+      // configurations using different encoded strings. Fall back to every
+      // matching source element when the exact configuration cannot walk the
+      // occurrence path.
+      if (!nested.length && exactConfiguration.length && exactConfiguration.length !== compatible.length) {
+        nested = compatible.flatMap((candidate) => walk(candidate, index + 1));
+      }
+      results.push(...nested);
+    }
+    return results;
+  };
+  return walk(definition.rootAssembly, 0);
+}
+
+function uniqueAssemblySource(candidates: OnshapeAssemblyInstance[]): OnshapeAssemblyInstance | undefined {
+  if (!candidates.length) return undefined;
+  const keyedCandidates = candidates
+    .map((candidate) => ({ candidate, key: assemblyInstanceSourceKey(candidate) }))
+    .filter((entry): entry is { candidate: OnshapeAssemblyInstance; key: string } => Boolean(entry.key));
+  const sourceKeys = new Set(keyedCandidates.map((entry) => entry.key));
+  if (sourceKeys.size === 1) return keyedCandidates[0].candidate;
+  if (candidates.length === 1) return candidates[0];
+  return undefined;
+}
+
+function hydrateAssemblyPartSource(
+  instance: OnshapeAssemblyInstance,
+  parts: OnshapeAssemblyInstance[],
+): OnshapeAssemblyInstance {
+  if (typeof instance.partId !== "string") return instance;
+  const compatible = parts.filter((part) => {
+    if (part.partId !== instance.partId) return false;
+    for (const field of ["documentId", "elementId", "documentMicroversion", "documentVersion"] as const) {
+      if (typeof instance[field] === "string" && typeof part[field] === "string" && instance[field] !== part[field]) return false;
+    }
+    return true;
+  });
+  const source = uniqueAssemblySource(compatible);
+  if (!source) return instance;
+  const definedInstanceFields = Object.fromEntries(
+    Object.entries(instance).filter(([, value]) => value !== undefined && value !== null),
+  ) as OnshapeAssemblyInstance;
+  return { ...source, ...definedInstanceFields };
+}
+
+function sourceExportContext(
+  instance: OnshapeAssemblyInstance,
+  assemblyContext: ExportBody["context"],
+  sourceContext: ExportBody["context"],
+): ExportBody["context"] | undefined {
+  const documentVersion = typeof instance.documentVersion === "string" && instance.documentVersion
+    ? instance.documentVersion
+    : undefined;
+  if (documentVersion) {
+    return {
+      ...sourceContext,
+      workspaceOrVersion: "v",
+      workspaceOrVersionId: documentVersion,
+    };
+  }
+  // An unversioned occurrence can only come from the active document
+  // workspace. The instance includes its microversion but not its workspace
+  // id, so reuse the assembly's document-wide workspace/version id.
+  if (instance.documentId === assemblyContext.documentId && assemblyContext.workspaceOrVersion !== "m") {
+    return {
+      ...sourceContext,
+      workspaceOrVersion: assemblyContext.workspaceOrVersion,
+      workspaceOrVersionId: assemblyContext.workspaceOrVersionId,
+    };
   }
   return undefined;
 }
@@ -591,8 +674,8 @@ async function resolveAssemblySelections(
   session: StoredSession,
   sessionId: string,
   version: string,
-): Promise<{ context: ExportBody["context"]; selections: ExportBody["selections"] }> {
-  if (context.contextType !== "assembly") return { context, selections };
+): Promise<ResolvedSelections> {
+  if (context.contextType !== "assembly") return { context, selections, exportTarget: { context } };
   const endpoint = new URL(
     `${session.server}/api/${version}/assemblies/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
   );
@@ -610,23 +693,38 @@ async function resolveAssemblySelections(
   const instances = [
     ...(Array.isArray(definition?.rootAssembly?.instances) ? definition.rootAssembly.instances : []),
     ...(Array.isArray(definition?.subAssemblies) ? definition.subAssemblies.flatMap((assembly) => Array.isArray(assembly.instances) ? assembly.instances : []) : []),
-  ].filter((instance) => instance.type === "Part" && instance.isStandardContent !== true);
+  ].filter((instance) => String(instance.type).toLowerCase() === "part" && instance.isStandardContent !== true);
   if (!instances.length) throw new HttpError(422, "The assembly contains no supported Part Studio instances.");
 
+  const assemblyParts = Array.isArray(definition.parts) ? definition.parts : [];
   const selectedInstances = selections.map((selection, index) => {
     const occurrenceInstance = selection.occurrencePath
-      ? partInstanceAtOccurrencePath(definition, selection.occurrencePath)
+      ? uniqueAssemblySource(partInstancesAtOccurrencePath(definition, selection.occurrencePath))
       : undefined;
-    if (occurrenceInstance && occurrenceInstance.isStandardContent !== true) return occurrenceInstance;
+    if (occurrenceInstance && occurrenceInstance.isStandardContent !== true) {
+      return hydrateAssemblyPartSource(occurrenceInstance, assemblyParts);
+    }
     const leafOccurrenceId = selection.occurrencePath?.at(-1);
-    const candidates = instances.filter((instance) =>
-      (leafOccurrenceId && instance.id === leafOccurrenceId)
-      || (selection.entityType === "BODY" && instance.id === selection.selectionId)
-      || (selection.partId && instance.partId === selection.partId)
-      || instance.partId === selection.selectionId,
-    );
-    const sourceKeys = new Set(candidates.map(assemblyInstanceSourceKey).filter(Boolean));
-    if (candidates.length && sourceKeys.size === 1) return candidates[0];
+    const candidateGroups = [
+      leafOccurrenceId && selection.partId
+        ? instances.filter((instance) => instance.id === leafOccurrenceId && instance.partId === selection.partId)
+        : [],
+      leafOccurrenceId ? instances.filter((instance) => instance.id === leafOccurrenceId) : [],
+      selection.entityType === "BODY"
+        ? instances.filter((instance) => instance.id === selection.selectionId || instance.partId === selection.selectionId)
+        : [],
+      selection.partId ? instances.filter((instance) => instance.partId === selection.partId) : [],
+    ];
+    for (const candidates of candidateGroups) {
+      const candidate = uniqueAssemblySource(candidates);
+      if (candidate) return hydrateAssemblyPartSource(candidate, assemblyParts);
+    }
+    if (selection.partId) {
+      const part = uniqueAssemblySource(assemblyParts.filter((candidate) =>
+        candidate.partId === selection.partId && candidate.isStandardContent !== true,
+      ));
+      if (part) return { ...part, type: "Part", name: selection.name };
+    }
     throw new HttpError(422, `Onshape could not resolve selection ${index + 1} to one assembly part instance.`);
   });
   const selectedOccurrenceKeys = new Set(selections.map((selection, index) =>
@@ -656,6 +754,11 @@ async function resolveAssemblySelections(
     contextType: "partstudio",
     onshapeUserId: context.onshapeUserId,
   };
+  const translatedContext = sourceExportContext(instance, context, sourceContext);
+  const occurrencePath = selections[0].occurrencePath;
+  if (!translatedContext && (context.workspaceOrVersion === "m" || !occurrencePath?.length)) {
+    throw new HttpError(422, "Onshape identified the selected assembly part only by microversion and did not provide an exportable workspace, version, or occurrence path.");
+  }
   return {
     context: sourceContext,
     selections: selections.map((selection, index) => ({
@@ -664,6 +767,9 @@ async function resolveAssemblySelections(
       partId: selectedInstances[index].partId as string,
       name: selection.name ?? (typeof selectedInstances[index].name === "string" ? selectedInstances[index].name : undefined),
     })),
+    exportTarget: translatedContext
+      ? { context: translatedContext }
+      : { context, occurrencePath },
   };
 }
 
@@ -1047,14 +1153,20 @@ async function callOnshapeExport(
   sessionId: string,
   resolvedPartId?: string,
   resolvedFaceView?: string,
+  exportTarget: ResolvedSelections["exportTarget"] = { context: body.context },
 ): Promise<{ bytes: Buffer; contentType: string }> {
-  if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
-  const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
+  if (body.context.server !== session.server || exportTarget.context.server !== session.server) {
+    throw new HttpError(400, "The selected document does not match the connected Onshape server.");
+  }
+  const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = exportTarget.context;
   const version = apiVersion.value().replace(/^\//, "");
   let endpoint: string;
   let publicDxfEndpoint: string | undefined;
   let payload: Record<string, unknown>;
   if (body.kind === "dxf") {
+    if (exportTarget.context.contextType === "assembly") {
+      throw new HttpError(422, "Onshape did not provide an exportable Part Studio workspace or version for this assembly face.");
+    }
     const documentExportBase = `${session.server}/api/${version}/documents/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}`;
     endpoint = `${documentExportBase}/exportinternal`;
     publicDxfEndpoint = `${documentExportBase}/export`;
@@ -1076,14 +1188,25 @@ async function callOnshapeExport(
       ...(configuration ? { configuration } : {}),
     };
   } else if (body.kind === "step") {
-    endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
-    payload = {
-      formatName: "STEP",
-      partIds: resolvedPartId ?? await selectedPartId(body, session, sessionId, version),
-      storeInDocument: false,
-      translate: true,
-      ...(configuration ? { configuration } : {}),
-    };
+    if (exportTarget.context.contextType === "assembly" && exportTarget.occurrencePath?.length) {
+      endpoint = `${session.server}/api/${version}/assemblies/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
+      payload = {
+        formatName: "STEP",
+        occurrencesToExport: exportTarget.occurrencePath.join(","),
+        storeInDocument: false,
+        translate: true,
+        ...(configuration ? { configuration } : {}),
+      };
+    } else {
+      endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
+      payload = {
+        formatName: "STEP",
+        partIds: resolvedPartId ?? await selectedPartId(body, session, sessionId, version),
+        storeInDocument: false,
+        translate: true,
+        ...(configuration ? { configuration } : {}),
+      };
+    }
   } else {
     throw new HttpError(400, "Lathe requests do not create an Onshape export file.");
   }
@@ -1329,7 +1452,8 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
         })
       : Promise.resolve(undefined);
     const metadataPromise = (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean }> => {
-      if (!partId) return { partMetadataFound: false };
+      const instanceName = cleanSuggestion(sourceSelection.name);
+      if (!partId) return { partMetadataFound: false, ...(instanceName ? { friendlyName: instanceName } : {}) };
       const endpoint = new URL(
         `${session.server}/api/${version}/parts/d/${encodeURIComponent(sourceContext.documentId)}/${sourceContext.workspaceOrVersion}/${encodeURIComponent(sourceContext.workspaceOrVersionId)}/e/${encodeURIComponent(sourceContext.elementId)}`,
       );
@@ -1340,15 +1464,16 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
       }, session, sessionId);
       if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
       const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
-      if (!Array.isArray(parts)) return { partMetadataFound: false };
+      if (!Array.isArray(parts)) return { partMetadataFound: false, ...(instanceName ? { friendlyName: instanceName } : {}) };
       const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
-      if (!part) return { partMetadataFound: false };
+      if (!part) return { partMetadataFound: false, ...(instanceName ? { friendlyName: instanceName } : {}) };
       const material = suggestedDxfMaterial(part?.material?.displayName, part?.material?.libraryName, part?.material?.id);
-      const friendlyName = cleanSuggestion(part?.name);
+      const friendlyName = cleanSuggestion(part?.name) ?? instanceName;
       return { partMetadataFound: true, ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
     })().catch((error: unknown) => {
       console.warn("Could not suggest the selected Onshape part details.", error);
-      return { partMetadataFound: false };
+      const instanceName = cleanSuggestion(sourceSelection.name);
+      return { partMetadataFound: false, ...(instanceName ? { friendlyName: instanceName } : {}) };
     });
     const [dxfBounds, stepBounds, metadata] = await Promise.all([dxfBoundsPromise, stepBoundsPromise, metadataPromise]);
     return { ...metadata, ...(dxfBounds ? { dxfBounds } : {}), ...(stepBounds ? { stepBounds } : {}) };
@@ -1441,7 +1566,7 @@ async function handleExport(req: Request, res: Response): Promise<void> {
       })
     : Promise.resolve(undefined);
   const [{ bytes, contentType }, preview, dxfBounds, stepBounds] = await Promise.all([
-    callOnshapeExport(body, session, sessionId, partId, faceView),
+    callOnshapeExport(body, session, sessionId, partId, faceView, resolved.exportTarget),
     previewPromise,
     dxfBoundsPromise,
     stepBoundsPromise,
