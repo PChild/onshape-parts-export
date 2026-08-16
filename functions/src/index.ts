@@ -76,7 +76,7 @@ function setCors(req: Request, res: Response): boolean {
     res.set("Access-Control-Allow-Origin", configured);
     res.set("Vary", "Origin");
     res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
-    res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   }
   if (req.method === "OPTIONS") {
     res.status(origin === configured ? 204 : 403).send();
@@ -304,12 +304,13 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
 }
 
 async function startOAuth(req: Request, res: Response): Promise<void> {
-  const returnOrigin = new URL(readString(req.query.returnOrigin, "Return origin", 500)).origin;
-  if (returnOrigin !== normalizedConfiguredOrigin()) throw new HttpError(400, "Invalid return origin.");
+  const returnUrl = new URL(readString(req.query.returnUrl, "Return URL", 4000));
+  if (returnUrl.origin !== normalizedConfiguredOrigin()) throw new HttpError(400, "Invalid return URL.");
+  returnUrl.hash = "";
   const server = safeOnshapeOrigin(req.query.server);
   const state = randomToken();
   await db.collection("oauthStates").doc(tokenHash(state)).set({
-    returnOrigin,
+    returnUrl: returnUrl.toString(),
     server,
     expectedUserId: readOptionalString(req.query.userId, "User ID", 128),
     expiresAt: Timestamp.fromMillis(Date.now() + STATE_TTL_MS),
@@ -323,48 +324,66 @@ async function startOAuth(req: Request, res: Response): Promise<void> {
   res.redirect(authorize.toString());
 }
 
-function callbackHtml(returnOrigin: string, sessionToken: string, userName: string): string {
-  const payload = JSON.stringify({ type: "onshape-oauth-success", sessionToken, userName }).replace(/</g, "\\u003c");
-  const target = JSON.stringify(returnOrigin).replace(/</g, "\\u003c");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Connected</title><style>body{font:15px system-ui;margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f5f7;color:#202326}.box{text-align:center;background:white;border:1px solid #dce1e5;border-radius:12px;padding:28px;box-shadow:0 8px 24px #14201e12}.check{width:42px;height:42px;margin:auto auto 12px;border-radius:50%;display:grid;place-items:center;background:#eaf4ed;color:#2f6840;font-size:24px}</style></head><body><div class="box"><div class="check">✓</div><strong>Onshape connected</strong><p>You can close this window.</p></div><script>if(window.opener){window.opener.postMessage(${payload},${target});setTimeout(()=>window.close(),350)}</script></body></html>`;
+function oauthReturnUrl(returnUrl: string, key: "oauthSession" | "oauthError", value: string): string {
+  const target = new URL(returnUrl);
+  const fragment = new URLSearchParams();
+  fragment.set(key, value);
+  target.hash = fragment.toString();
+  return target.toString();
 }
 
 async function finishOAuth(req: Request, res: Response): Promise<void> {
-  if (typeof req.query.error === "string") throw new HttpError(400, `Onshape authorization was denied: ${req.query.error}`);
-  const code = readString(req.query.code, "Authorization code", 2000);
   const state = readString(req.query.state, "OAuth state", 200);
   const stateRef = db.collection("oauthStates").doc(tokenHash(state));
   const snapshot = await stateRef.get();
   if (!snapshot.exists) throw new HttpError(400, "This authorization request is invalid or has already been used.");
-  const stateData = snapshot.data() as { returnOrigin: string; server: string; expectedUserId?: string; expiresAt: Timestamp };
+  const stateData = snapshot.data() as { returnUrl: string; server: string; expectedUserId?: string; expiresAt: Timestamp };
   await stateRef.delete();
   if (stateData.expiresAt.toMillis() <= Date.now()) throw new HttpError(400, "This authorization request expired. Try connecting again.");
 
-  const token = await exchangeToken({ grant_type: "authorization_code", code, redirect_uri: redirectUri.value() });
-  const profileResponse = await fetch(`${stateData.server}/api/users/sessioninfo`, {
-    headers: { Authorization: `Bearer ${token.access_token}`, Accept: "application/json" },
-  });
-  if (!profileResponse.ok) throw new HttpError(502, "Could not read the signed-in Onshape user.");
-  const profile = await profileResponse.json() as Record<string, unknown>;
-  const nestedUser = profile.user && typeof profile.user === "object" ? profile.user as Record<string, unknown> : profile;
-  const userId = String(nestedUser.id ?? nestedUser.userId ?? "");
-  const userName = String(nestedUser.name ?? nestedUser.displayName ?? nestedUser.email ?? "Onshape user");
-  const email = typeof nestedUser.email === "string" ? nestedUser.email : undefined;
-  if (!userId) throw new HttpError(502, "Onshape did not return a user ID.");
-  if (stateData.expectedUserId && stateData.expectedUserId !== userId) throw new HttpError(403, "The connected account does not match the active Onshape user.");
-  if (!token.refresh_token) throw new HttpError(502, "Onshape did not return a refresh token.");
+  if (typeof req.query.error === "string") {
+    res.redirect(303, oauthReturnUrl(stateData.returnUrl, "oauthError", `Onshape authorization was denied: ${req.query.error}`));
+    return;
+  }
 
-  const sessionToken = randomToken();
-  await db.collection("onshapeSessions").doc(tokenHash(sessionToken)).set({
-    accessToken: token.access_token,
-    refreshToken: token.refresh_token,
-    accessExpiresAt: Timestamp.fromMillis(Date.now() + (token.expires_in ?? 3600) * 1000),
-    expiresAt: Timestamp.fromMillis(Date.now() + SESSION_TTL_MS),
-    server: stateData.server,
-    user: { id: userId, name: userName, ...(email ? { email } : {}) },
-    createdAt: FieldValue.serverTimestamp(),
-  });
-  res.status(200).type("html").send(callbackHtml(stateData.returnOrigin, sessionToken, userName));
+  try {
+    const code = readString(req.query.code, "Authorization code", 2000);
+    const token = await exchangeToken({ grant_type: "authorization_code", code, redirect_uri: redirectUri.value() });
+    const profileResponse = await fetch(`${stateData.server}/api/users/sessioninfo`, {
+      headers: { Authorization: `Bearer ${token.access_token}`, Accept: "application/json" },
+    });
+    if (!profileResponse.ok) throw new HttpError(502, "Could not read the signed-in Onshape user.");
+    const profile = await profileResponse.json() as Record<string, unknown>;
+    const nestedUser = profile.user && typeof profile.user === "object" ? profile.user as Record<string, unknown> : profile;
+    const userId = String(nestedUser.id ?? nestedUser.userId ?? "");
+    const userName = String(nestedUser.name ?? nestedUser.displayName ?? nestedUser.email ?? "Onshape user");
+    const email = typeof nestedUser.email === "string" ? nestedUser.email : undefined;
+    if (!userId) throw new HttpError(502, "Onshape did not return a user ID.");
+    if (stateData.expectedUserId && stateData.expectedUserId !== userId) throw new HttpError(403, "The connected account does not match the active Onshape user.");
+    if (!token.refresh_token) throw new HttpError(502, "Onshape did not return a refresh token.");
+
+    const sessionToken = randomToken();
+    await db.collection("onshapeSessions").doc(tokenHash(sessionToken)).set({
+      accessToken: token.access_token,
+      refreshToken: token.refresh_token,
+      accessExpiresAt: Timestamp.fromMillis(Date.now() + (token.expires_in ?? 3600) * 1000),
+      expiresAt: Timestamp.fromMillis(Date.now() + SESSION_TTL_MS),
+      server: stateData.server,
+      user: { id: userId, name: userName, ...(email ? { email } : {}) },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    res.redirect(303, oauthReturnUrl(stateData.returnUrl, "oauthSession", sessionToken));
+  } catch (error) {
+    console.error(error);
+    const message = error instanceof HttpError ? error.message : "Onshape authorization failed.";
+    res.redirect(303, oauthReturnUrl(stateData.returnUrl, "oauthError", message));
+  }
+}
+
+async function disconnectSession(req: Request, res: Response): Promise<void> {
+  const id = tokenHash(bearerToken(req));
+  await db.collection("onshapeSessions").doc(id).delete();
+  res.status(204).send();
 }
 
 async function handleExport(req: Request, res: Response): Promise<void> {
@@ -423,6 +442,7 @@ async function handler(req: Request, res: Response): Promise<void> {
     res.json({ user: data.user });
     return;
   }
+  if (req.method === "DELETE" && path === "/session") return disconnectSession(req, res);
   if (req.method === "POST" && path === "/exports") return handleExport(req, res);
   throw new HttpError(404, "Not found.");
 }

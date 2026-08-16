@@ -25,6 +25,10 @@ export function getSession(sessionToken: string): Promise<{ user: SessionUser }>
   return apiFetch("/session", sessionToken);
 }
 
+export function disconnectSession(sessionToken: string): Promise<void> {
+  return apiFetch("/session", sessionToken, { method: "DELETE" });
+}
+
 export function createExport(sessionToken: string, request: ExportRequest): Promise<ExportResult> {
   return apiFetch("/exports", sessionToken, { method: "POST", body: JSON.stringify(request) });
 }

@@ -76,7 +76,7 @@ Deploy the backend:
 firebase deploy --only functions
 ```
 
-`APP_ORIGIN` is an origin, not a complete page URL: do not include the repository path or a trailing slash. The backend uses it for CORS and OAuth popup validation.
+`APP_ORIGIN` is an origin, not a complete page URL: do not include the repository path or a trailing slash. The backend uses it for CORS and to validate the same-pane OAuth return URL.
 
 ## 3. Configure the Onshape OAuth app
 
@@ -124,6 +124,8 @@ The Storage object includes custom metadata for the request and the `exports/{ex
 - file name, Storage path, MIME type, byte count, status, and server timestamp
 
 OAuth refresh tokens are stored only in the backend-only `onshapeSessions` collection. Firestore and Storage rules deny all direct browser access; Firebase Admin SDK calls from the function bypass those rules.
+
+OAuth opens inside the Onshape application pane. After connecting, the app stores an opaque session token in that pane's session storage. **Disconnect** deletes the corresponding backend session and removes the browser token.
 
 ## Notes on exports
 

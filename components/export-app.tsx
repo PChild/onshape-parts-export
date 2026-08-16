@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { createExport, getApiBase, getSession } from "@/lib/api";
+import { createExport, disconnectSession, getApiBase, getSession } from "@/lib/api";
 import { postToOnshape, readOnshapeContext, selectionFromMessage } from "@/lib/onshape";
 import type { ExportKind, Material, OnshapeContext, OnshapeSelection, SessionUser } from "@/lib/types";
 
@@ -55,6 +55,7 @@ export function ExportApp() {
   }, [browserReady, themeOverride]);
   const [user, setUser] = useState<SessionUser | null>(null);
   const [sessionToken, setSessionToken] = useState("");
+  const [disconnecting, setDisconnecting] = useState(false);
   const [friendlyName, setFriendlyName] = useState("");
   const [quantity, setQuantity] = useState(1);
   const [machining, setMachining] = useState<"laser" | "plasma" | "waterjet">("laser");
@@ -64,8 +65,21 @@ export function ExportApp() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    const savedSession = sessionStorage.getItem(SESSION_KEY);
+    const fragment = new URLSearchParams(window.location.hash.slice(1));
+    const returnedSession = fragment.get("oauthSession");
+    const oauthError = fragment.get("oauthError");
+    if (returnedSession || oauthError) {
+      history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    if (oauthError) {
+      queueMicrotask(() => {
+        setSubmission("error");
+        setMessage(oauthError);
+      });
+    }
+    const savedSession = returnedSession ?? sessionStorage.getItem(SESSION_KEY);
     if (savedSession) {
+      if (returnedSession) sessionStorage.setItem(SESSION_KEY, returnedSession);
       getSession(savedSession).then(({ user: restored }) => {
         setSessionToken(savedSession);
         setUser(restored);
@@ -100,21 +114,6 @@ export function ExportApp() {
     return () => window.removeEventListener("message", handler);
   }, [context]);
 
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      let apiOrigin = "";
-      try { apiOrigin = new URL(getApiBase()).origin; } catch { return; }
-      if (event.origin !== apiOrigin || event.data?.type !== "onshape-oauth-success") return;
-      const token = event.data.sessionToken;
-      if (typeof token !== "string") return;
-      sessionStorage.setItem(SESSION_KEY, token);
-      setSessionToken(token);
-      getSession(token).then(({ user: signedInUser }) => setUser(signedInUser)).catch((error: Error) => setMessage(error.message));
-    };
-    window.addEventListener("message", handler);
-    return () => window.removeEventListener("message", handler);
-  }, []);
-
   const selectTarget = useCallback(() => {
     if (!context) return;
     const entityType = kind === "dxf" ? "FACE" : "BODY";
@@ -147,11 +146,32 @@ export function ExportApp() {
       return;
     }
     const url = new URL(`${apiBase}/oauth/start`);
-    url.searchParams.set("returnOrigin", window.location.origin);
+    const returnUrl = new URL(window.location.href);
+    returnUrl.hash = "";
+    url.searchParams.set("returnUrl", returnUrl.toString());
     url.searchParams.set("server", context.server);
     if (context.onshapeUserId) url.searchParams.set("userId", context.onshapeUserId);
-    const popup = window.open(url, "shop-export-oauth", "popup,width=620,height=760");
-    if (!popup) setMessage("Please allow pop-ups to connect your Onshape account.");
+    window.location.assign(url.toString());
+  };
+
+  const disconnect = async () => {
+    if (!sessionToken || disconnecting) return;
+    setDisconnecting(true);
+    setSubmission("idle");
+    setMessage("Disconnecting your Onshape account…");
+    try {
+      await disconnectSession(sessionToken);
+      sessionStorage.removeItem(SESSION_KEY);
+      setSessionToken("");
+      setUser(null);
+      setSubmission("idle");
+      setMessage("Onshape account disconnected.");
+    } catch (error) {
+      setSubmission("error");
+      setMessage(error instanceof Error ? error.message : "Could not disconnect your Onshape account.");
+    } finally {
+      setDisconnecting(false);
+    }
   };
 
   const canSubmit = useMemo(
@@ -238,7 +258,9 @@ export function ExportApp() {
           <section className="identity-row">
             <div className="avatar">{user ? user.name.slice(0, 1).toUpperCase() : "?"}</div>
             <div><span>Requested by</span><strong>{user?.name ?? "Onshape account not connected"}</strong></div>
-            {!user && <button type="button" className="text-button" onClick={signIn} disabled={!context}>Connect</button>}
+            {user
+              ? <button type="button" className="text-button disconnect-button" onClick={disconnect} disabled={disconnecting}>{disconnecting ? "Disconnecting…" : "Disconnect"}</button>
+              : <button type="button" className="text-button" onClick={signIn} disabled={!context}>Connect</button>}
           </section>
 
           {message && <div className={`status ${submission}`} role="status">{submission === "complete" && <CheckIcon />}<span>{message}</span></div>}

@@ -106,6 +106,7 @@ input::placeholder { color: var(--faint); }
 .identity-row strong { overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
 .text-button { margin-left: auto; border: 0; background: transparent; color: var(--accent); font-size: 11px; font-weight: 750; cursor: pointer; }
 .text-button:disabled { opacity: .45; }
+.disconnect-button { color: var(--danger); }
 
 .status { min-height: 42px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .status.complete { color: var(--accent-strong); background: var(--accent-soft); border-color: transparent; }
