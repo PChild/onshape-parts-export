@@ -225,9 +225,15 @@ function parseExportBody(value: unknown): ExportBody {
   const body = value as Partial<ExportBody>;
   const kind = body.kind;
   if (kind !== "dxf" && kind !== "step") throw new HttpError(400, "Export type must be DXF or STEP.");
-  const expectedType: SelectionType = kind === "dxf" ? "FACE" : "BODY";
-  if (!body.context || !body.selection || body.selection.entityType !== expectedType) {
-    throw new HttpError(400, `Select exactly one ${kind === "dxf" ? "face" : "part"}.`);
+  if (!body.context || !body.selection) {
+    throw new HttpError(400, `Select exactly one ${kind === "dxf" ? "face" : "part or face"}.`);
+  }
+  const rawSelectionType = String(body.selection.entityType).toUpperCase();
+  const selectionType: SelectionType | undefined = rawSelectionType === "FACE"
+    ? "FACE"
+    : ["BODY", "PART", "SOLID"].includes(rawSelectionType) ? "BODY" : undefined;
+  if (!selectionType || (kind === "dxf" && selectionType !== "FACE")) {
+    throw new HttpError(400, `Select exactly one ${kind === "dxf" ? "face" : "part or face"}.`);
   }
   const quantity = Number(body.quantity);
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 999) throw new HttpError(400, "Quantity must be between 1 and 999.");
@@ -257,7 +263,7 @@ function parseExportBody(value: unknown): ExportBody {
       onshapeUserId: readOptionalString(body.context.onshapeUserId, "Onshape user ID", 128),
     },
     selection: {
-      entityType: expectedType,
+      entityType: selectionType,
       selectionId: readId(body.selection.selectionId, "Selection ID"),
       partId: body.selection.partId ? readId(body.selection.partId, "Part ID") : undefined,
       name: readOptionalString(body.selection.name, "Selection name", 120),
@@ -270,24 +276,152 @@ function safeFileStem(value: string): string {
   return stem || "part";
 }
 
+interface OnshapeVector3 {
+  x?: unknown;
+  y?: unknown;
+  z?: unknown;
+}
+
+interface OnshapeFaceDetails {
+  id?: unknown;
+  surface?: {
+    type?: unknown;
+    direction?: OnshapeVector3;
+    directionOrientedWithFace?: OnshapeVector3;
+    normal?: OnshapeVector3;
+  };
+}
+
+interface OnshapeBodyDetails {
+  id?: unknown;
+  faces?: OnshapeFaceDetails[];
+}
+
+function normalizedVector(value: OnshapeVector3 | undefined): [number, number, number] | undefined {
+  const vector = [Number(value?.x), Number(value?.y), Number(value?.z)] as [number, number, number];
+  if (!vector.every(Number.isFinite)) return undefined;
+  const length = Math.hypot(...vector);
+  if (length < 1e-12) return undefined;
+  return vector.map((component) => component / length) as [number, number, number];
+}
+
+function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function faceViewMatrix(normal: [number, number, number]): string {
+  // Onshape's document exporter expects a flattened 4x4 view. Choose a
+  // stable in-plane X axis; the selected face normal becomes the view Z axis.
+  const reference: [number, number, number] = Math.abs(normal[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0];
+  const rawXAxis = cross(reference, normal);
+  const xAxis = normalizedVector({ x: rawXAxis[0], y: rawXAxis[1], z: rawXAxis[2] });
+  if (!xAxis) throw new HttpError(422, "Could not determine the selected face orientation.");
+  const yAxis = cross(normal, xAxis);
+  return [...xAxis, 0, ...yAxis, 0, ...normal, 0, 0, 0, 0, 1].join(",");
+}
+
+async function getPartStudioBodyDetails(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<OnshapeBodyDetails[]> {
+  const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
+  const endpoint = new URL(
+    `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/bodydetails`,
+  );
+  if (configuration) endpoint.searchParams.set("configuration", configuration);
+  const response = await authorizedOnshapeFetch(endpoint.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  }, session, sessionId);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not inspect the selected Part Studio geometry. ${detail}`.trim());
+  }
+  const details = await response.json().catch(() => null) as {
+    bodies?: OnshapeBodyDetails[];
+  } | null;
+  if (!Array.isArray(details?.bodies)) throw new HttpError(502, "Onshape returned invalid Part Studio body details.");
+  return details.bodies;
+}
+
+async function selectedFaceView(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<string> {
+  const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const face = bodies
+    .flatMap((part) => Array.isArray(part.faces) ? part.faces : [])
+    .find((candidate) => candidate.id === body.selection.selectionId);
+  if (!face) throw new HttpError(422, "The selected face no longer exists in the current Part Studio configuration.");
+  if (face.surface?.type !== "PLANE") throw new HttpError(422, "Select a planar face for a DXF export.");
+  const normal = normalizedVector(
+    face.surface.directionOrientedWithFace ?? face.surface.normal ?? face.surface.direction,
+  );
+  if (!normal) throw new HttpError(422, "Onshape did not return a valid plane for the selected face.");
+  return faceViewMatrix(normal);
+}
+
+async function selectedPartId(
+  body: ExportBody,
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<string> {
+  const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
+  const selectedIds = new Set([body.selection.selectionId, body.selection.partId].filter((value): value is string => Boolean(value)));
+  const selectedBody = bodies.find((candidate) =>
+    (typeof candidate.id === "string" && selectedIds.has(candidate.id))
+    || candidate.faces?.some((face) => typeof face.id === "string" && selectedIds.has(face.id)),
+  );
+  if (typeof selectedBody?.id === "string" && selectedBody.id) return selectedBody.id;
+  if (body.selection.entityType === "BODY") return body.selection.partId ?? body.selection.selectionId;
+  throw new HttpError(422, "The selected face no longer belongs to a part in the current Part Studio configuration.");
+}
+
 async function callOnshapeExport(body: ExportBody, session: StoredSession, sessionId: string): Promise<{ bytes: Buffer; contentType: string }> {
   if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
   const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
   const version = apiVersion.value().replace(/^\//, "");
-  const endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
-  const selectedId = body.kind === "dxf" ? body.selection.selectionId : body.selection.partId ?? body.selection.selectionId;
-  const payload: Record<string, unknown> = {
-    formatName: body.kind.toUpperCase(),
-    partIds: selectedId,
-    storeInDocument: false,
-    translate: true,
-    ...(configuration ? { configuration } : {}),
-  };
+  let endpoint: string;
+  let publicDxfEndpoint: string | undefined;
+  let payload: Record<string, unknown>;
   if (body.kind === "dxf") {
-    Object.assign(payload, {
+    const documentExportBase = `${session.server}/api/${version}/documents/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}`;
+    endpoint = `${documentExportBase}/exportinternal`;
+    publicDxfEndpoint = `${documentExportBase}/export`;
+    payload = {
+      documentId,
+      elementId,
+      format: "DXF",
+      destinationName: safeFileStem(body.friendlyName),
+      partIds: body.selection.selectionId,
+      view: await selectedFaceView(body, session, sessionId, version),
+      version: "2018",
       flatten: true,
-      splinesAsPolylines: false,
-    });
+      splinesAsPolylines: true,
+      storeInDocument: false,
+      triggerAutoDownload: true,
+      zipSingleFileOutput: false,
+      ...(workspaceOrVersion === "w" ? { workspaceId: workspaceOrVersionId } : { documentVersionId: workspaceOrVersionId }),
+      ...(configuration ? { configuration } : {}),
+    };
+  } else {
+    endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
+    payload = {
+      formatName: "STEP",
+      partIds: await selectedPartId(body, session, sessionId, version),
+      storeInDocument: false,
+      translate: true,
+      ...(configuration ? { configuration } : {}),
+    };
   }
 
   let response = await authorizedOnshapeFetch(endpoint, {
@@ -299,6 +433,17 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
     body: JSON.stringify(payload),
     redirect: "follow",
   }, session, sessionId);
+  if (!response.ok && publicDxfEndpoint) {
+    response = await authorizedOnshapeFetch(publicDxfEndpoint, {
+      method: "POST",
+      headers: {
+        Accept: "application/octet-stream, application/json",
+        "Content-Type": "application/json;charset=UTF-8",
+      },
+      body: JSON.stringify(payload),
+      redirect: "follow",
+    }, session, sessionId);
+  }
 
   let resultUrl: string | undefined;
   const deadline = Date.now() + EXPORT_RESULT_TIMEOUT_MS;

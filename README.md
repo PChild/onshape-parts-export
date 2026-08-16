@@ -3,7 +3,7 @@
 A classroom-focused Onshape right-panel extension that sends manufacturing files to Firebase:
 
 - Select one planar face and export a DXF for laser, plasma, or waterjet cutting.
-- Select one solid part and export a STEP file for 3D printing.
+- Select one solid part—or any face on that part—and export a STEP file for 3D printing.
 - Require a friendly name and quantity; DXF requests also require material and accept an optional subsystem.
 - Record the authenticated Onshape user with every file.
 - Store the file in Cloud Storage and a searchable audit record in Firestore.
@@ -129,8 +129,8 @@ OAuth opens inside the Onshape application pane. After connecting, the app store
 
 ## Notes on exports
 
-- DXF requests use the Onshape Part Studio translation endpoint with the selected face ID and flattened geometry.
-- STEP requests use the same supported translation workflow with the selected body's part/deterministic ID.
+- DXF requests resolve the selected planar face with the Part Studio body-details API, then use Onshape's document DXF exporter with that face ID and its derived view plane.
+- STEP requests resolve a selected body or face to its owning Part Studio body, then use the Part Studio translation workflow with that deterministic part ID.
 - Onshape may prepare exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
 - The function rejects exports above 250 MB and gives each file a collision-safe suffix.
 - If your enterprise uses a custom Onshape domain, the extension-provided `server` is preserved through OAuth and API calls. Only HTTPS `*.onshape.com` origins are accepted.

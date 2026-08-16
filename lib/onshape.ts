@@ -54,7 +54,7 @@ function firstString(record: UnknownRecord, keys: string[]): string | undefined 
   }
 }
 
-export function selectionFromMessage(data: unknown, expected: "FACE" | "BODY"): OnshapeSelection | null {
+export function selectionFromMessage(data: unknown, allowedTypes: readonly ("FACE" | "BODY")[]): OnshapeSelection | null {
   const root = asRecord(data);
   if (!root || root.messageName !== "SELECTION") return null;
 
@@ -71,8 +71,13 @@ export function selectionFromMessage(data: unknown, expected: "FACE" | "BODY"): 
   candidates.push(root);
 
   for (const candidate of candidates) {
-    const rawType = firstString(candidate, ["entityType", "type", "entityTypeSpecifier"])?.toUpperCase();
-    if (rawType && rawType !== expected) continue;
+    const declaredType = firstString(candidate, ["entityType", "entityTypeSpecifier"])?.toUpperCase();
+    const selectionType = firstString(candidate, ["selectionType", "type"])?.toUpperCase();
+    const candidateType = declaredType ?? selectionType;
+    const rawType = candidateType === "FACE"
+      ? "FACE"
+      : candidateType === "BODY" || candidateType === "PART" || candidateType === "SOLID" ? "BODY" : undefined;
+    if (rawType && !allowedTypes.includes(rawType)) continue;
     const selectionId = firstString(candidate, [
       "selectionId",
       "deterministicId",
@@ -81,8 +86,10 @@ export function selectionFromMessage(data: unknown, expected: "FACE" | "BODY"): 
       "id",
     ]);
     if (!selectionId) continue;
+    const entityType = rawType ?? (candidate.bodyType ? "BODY" : allowedTypes[0]);
+    if (!entityType) continue;
     return {
-      entityType: expected,
+      entityType,
       selectionId,
       partId: firstString(candidate, ["partId", "idTag"]),
       name: firstString(candidate, ["name", "partName"]),

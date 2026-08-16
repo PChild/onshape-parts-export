@@ -44,7 +44,7 @@ export function ExportApp() {
   const [kind, setKind] = useState<ExportKind>("dxf");
   const [selection, setSelection] = useState<OnshapeSelection | null>(null);
   const [selecting, setSelecting] = useState(false);
-  const expectedSelection = useRef<"FACE" | "BODY">("FACE");
+  const allowedSelectionTypes = useRef<readonly ("FACE" | "BODY")[]>(["FACE"]);
   const [themeOverride, setThemeOverride] = useState<Theme | null>(null);
   const theme = useMemo<Theme>(() => {
     if (themeOverride) return themeOverride;
@@ -104,7 +104,7 @@ export function ExportApp() {
     postToOnshape(context, { messageName: "applicationInit" });
     const handler = (event: MessageEvent) => {
       if (event.origin !== context.server) return;
-      const parsed = selectionFromMessage(event.data, expectedSelection.current);
+      const parsed = selectionFromMessage(event.data, allowedSelectionTypes.current);
       if (parsed) {
         setSelection(parsed);
         setSelecting(false);
@@ -116,15 +116,15 @@ export function ExportApp() {
 
   const selectTarget = useCallback(() => {
     if (!context) return;
-    const entityType = kind === "dxf" ? "FACE" : "BODY";
-    expectedSelection.current = entityType;
+    const entityTypes: readonly ("FACE" | "BODY")[] = kind === "dxf" ? ["FACE"] : ["BODY", "FACE"];
+    allowedSelectionTypes.current = entityTypes;
     setSelection(null);
     setSelecting(true);
     setMessage("");
     postToOnshape(context, {
       messageName: "requestSelection",
       messageId: crypto.randomUUID(),
-      entityTypeSpecifier: [entityType],
+      entityTypeSpecifier: entityTypes,
       requiredSelectionCount: 1,
     });
   }, [context, kind]);
@@ -236,11 +236,11 @@ export function ExportApp() {
           <section className="card selection-card">
             <div className="step-number">1</div>
             <div className="card-copy">
-              <h2>Select {kind === "dxf" ? "a planar face" : "a part"}</h2>
-              <p>{kind === "dxf" ? "Choose the face that should lie flat on the machine bed." : "Choose one solid body to manufacture."}</p>
+              <h2>Select {kind === "dxf" ? "a planar face" : "a part or any face on it"}</h2>
+              <p>{kind === "dxf" ? "Choose the face that should lie flat on the machine bed." : "Choose one solid body, or click any face belonging to that body."}</p>
             </div>
             <button className={`select-button ${selection ? "selected" : ""}`} type="button" onClick={selectTarget} disabled={!context}>
-              {selection ? <><CheckIcon /> Selected</> : selecting ? "Waiting for selection…" : `Select ${kind === "dxf" ? "face" : "part"}`}
+              {selection ? <><CheckIcon /> Selected</> : selecting ? "Waiting for selection…" : `Select ${kind === "dxf" ? "face" : "part or face"}`}
             </button>
             {selection && <div className="selection-detail"><span>{selection.entityType === "FACE" ? "Face" : "Part"}</span><code>{selection.name ?? selection.selectionId}</code><button type="button" onClick={selectTarget}>Change</button></div>}
           </section>
