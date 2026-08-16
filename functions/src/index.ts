@@ -269,25 +269,18 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
   if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
   const { documentId, workspaceOrVersion, workspaceOrVersionId, elementId, configuration } = body.context;
   const version = apiVersion.value().replace(/^\//, "");
-  const endpoint = `${session.server}/api/${version}/documents/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/export`;
-  const selectedId = body.selection.partId ?? body.selection.selectionId;
+  const endpoint = `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(documentId)}/${workspaceOrVersion}/${encodeURIComponent(workspaceOrVersionId)}/e/${encodeURIComponent(elementId)}/translations`;
+  const selectedId = body.kind === "dxf" ? body.selection.selectionId : body.selection.partId ?? body.selection.selectionId;
   const payload: Record<string, unknown> = {
-    documentId,
-    elementId,
-    format: body.kind.toUpperCase(),
-    destinationName: `${safeFileStem(body.friendlyName)}.${body.kind}`,
+    formatName: body.kind.toUpperCase(),
     partIds: selectedId,
     storeInDocument: false,
-    triggerAutoDownload: true,
-    zipSingleFileOutput: false,
-    configuration: configuration || "default",
-    ...(workspaceOrVersion === "w" ? { workspaceId: workspaceOrVersionId } : { documentVersionId: workspaceOrVersionId }),
+    translate: true,
+    ...(configuration ? { configuration } : {}),
   };
   if (body.kind === "dxf") {
     Object.assign(payload, {
       flatten: true,
-      view: "top",
-      version: "2018",
       splinesAsPolylines: false,
     });
   }
@@ -341,16 +334,31 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
     if (contentType.includes("json")) {
       const metadata = await response.json().catch(() => null) as {
         href?: unknown;
+        id?: unknown;
         requestState?: unknown;
         failureReason?: unknown;
         message?: unknown;
+        documentId?: unknown;
+        resultDocumentId?: unknown;
+        resultExternalDataIds?: unknown;
       } | null;
       const state = typeof metadata?.requestState === "string" ? metadata.requestState.toUpperCase() : "";
       if (state === "FAILED") {
         const reason = typeof metadata?.failureReason === "string" ? metadata.failureReason : "The export job failed.";
         throw new HttpError(502, `Onshape could not create this export. ${reason}`);
       }
-      if (typeof metadata?.href === "string") {
+
+      const externalIds = Array.isArray(metadata?.resultExternalDataIds)
+        ? metadata.resultExternalDataIds.filter((value): value is string => typeof value === "string" && Boolean(value))
+        : [];
+      if (state === "DONE" && externalIds.length) {
+        const resultDocumentId = typeof metadata?.resultDocumentId === "string"
+          ? metadata.resultDocumentId
+          : typeof metadata?.documentId === "string" ? metadata.documentId : documentId;
+        resultUrl = `${session.server}/api/${version}/documents/d/${encodeURIComponent(resultDocumentId)}/externaldata/${encodeURIComponent(externalIds[0])}`;
+      } else if (state === "DONE") {
+        throw new HttpError(502, "Onshape completed the export but did not provide a downloadable file.");
+      } else if (typeof metadata?.href === "string") {
         try {
           const candidate = new URL(metadata.href, session.server);
           safeOnshapeOrigin(candidate.origin);
@@ -358,6 +366,8 @@ async function callOnshapeExport(body: ExportBody, session: StoredSession, sessi
         } catch {
           throw new HttpError(502, "Onshape returned an invalid export result URL.");
         }
+      } else if (typeof metadata?.id === "string") {
+        resultUrl = `${session.server}/api/${version}/translations/${encodeURIComponent(metadata.id)}`;
       } else if (!resultUrl && state !== "ACTIVE") {
         const detail = typeof metadata?.message === "string" ? metadata.message : "The response did not contain a result URL.";
         throw new HttpError(502, `Onshape returned incomplete export metadata. ${detail}`);

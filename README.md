@@ -129,8 +129,8 @@ OAuth opens inside the Onshape application pane. After connecting, the app store
 
 ## Notes on exports
 
-- DXF requests use the production Onshape document export endpoint with the selected face deterministic ID, a top view, and DXF 2018 output.
-- STEP requests pass the selected body's part/deterministic ID to the same export endpoint.
+- DXF requests use the Onshape Part Studio translation endpoint with the selected face ID and flattened geometry.
+- STEP requests use the same supported translation workflow with the selected body's part/deterministic ID.
 - Onshape may prepare exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
 - The function rejects exports above 250 MB and gives each file a collision-safe suffix.
 - If your enterprise uses a custom Onshape domain, the extension-provided `server` is preserved through OAuth and API calls. Only HTTPS `*.onshape.com` origins are accepted.
