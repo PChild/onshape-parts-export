@@ -276,6 +276,18 @@ function safeFileStem(value: string): string {
   return stem || "part";
 }
 
+function withoutUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutUndefined);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .map(([key, item]) => [key, withoutUndefined(item)]),
+    );
+  }
+  return value;
+}
+
 interface OnshapeVector3 {
   x?: unknown;
   y?: unknown;
@@ -646,8 +658,9 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     contentType,
     metadata: { cacheControl: "private, max-age=0", metadata: customMetadata },
   });
+  const exportRequestMetadata = withoutUndefined(body) as Record<string, unknown>;
   await db.collection("exports").doc(exportId).set({
-    ...body,
+    ...exportRequestMetadata,
     fileName,
     storagePath,
     byteLength: bytes.length,
