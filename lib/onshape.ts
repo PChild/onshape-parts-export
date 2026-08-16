@@ -2,6 +2,12 @@ import type { OnshapeContext, OnshapeSelection } from "./types";
 
 type UnknownRecord = Record<string, unknown>;
 
+function resolvedParameter(value: string | null): string | undefined {
+  const clean = value?.trim();
+  if (!clean || /^\{\$[^{}]+\}$/.test(clean)) return undefined;
+  return clean;
+}
+
 function normalizeOrigin(value: string | null): string {
   if (!value) return "https://cad.onshape.com";
   try {
@@ -14,15 +20,15 @@ function normalizeOrigin(value: string | null): string {
 export function readOnshapeContext(url: URL): OnshapeContext | null {
   const p = url.searchParams;
   const pathMatch = url.pathname.match(/\/documents\/([^/]+)\/(w|v)\/([^/]+)\/e\/([^/]+)/);
-  const documentId = p.get("documentId") ?? pathMatch?.[1] ?? "";
-  const explicitWv = p.get("workspaceOrVersion");
-  const workspaceOrVersion = explicitWv === "v" || (!explicitWv && Boolean(p.get("versionId"))) ? "v" : "w";
+  const documentId = resolvedParameter(p.get("documentId")) ?? pathMatch?.[1] ?? "";
+  const explicitWv = resolvedParameter(p.get("workspaceOrVersion"));
+  const workspaceOrVersion = explicitWv === "v" || (!explicitWv && Boolean(resolvedParameter(p.get("versionId")))) ? "v" : "w";
   const workspaceOrVersionId =
-    p.get("workspaceOrVersionId") ??
-    (workspaceOrVersion === "v" ? p.get("versionId") : p.get("workspaceId")) ??
+    resolvedParameter(p.get("workspaceOrVersionId")) ??
+    (workspaceOrVersion === "v" ? resolvedParameter(p.get("versionId")) : resolvedParameter(p.get("workspaceId"))) ??
     pathMatch?.[3] ??
     "";
-  const elementId = p.get("elementId") ?? p.get("tabElementId") ?? pathMatch?.[4] ?? "";
+  const elementId = resolvedParameter(p.get("elementId")) ?? resolvedParameter(p.get("tabElementId")) ?? pathMatch?.[4] ?? "";
 
   if (!documentId || !workspaceOrVersionId || !elementId) return null;
 
@@ -32,8 +38,8 @@ export function readOnshapeContext(url: URL): OnshapeContext | null {
     workspaceOrVersionId,
     elementId,
     server: normalizeOrigin(p.get("server")),
-    configuration: p.get("configuration") ?? undefined,
-    onshapeUserId: p.get("userId") ?? undefined,
+    configuration: resolvedParameter(p.get("configuration")),
+    onshapeUserId: resolvedParameter(p.get("userId")),
   };
 }
 

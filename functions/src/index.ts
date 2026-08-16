@@ -209,6 +209,11 @@ function readOptionalString(value: unknown, label: string, maxLength = 100): str
   return readString(value, label, maxLength);
 }
 
+function readOptionalOnshapeParameter(value: unknown, label: string, maxLength = 100): string | undefined {
+  const clean = readOptionalString(value, label, maxLength);
+  return clean && !/^\{\$[^{}]+\}$/.test(clean) ? clean : undefined;
+}
+
 function readId(value: unknown, label: string): string {
   const id = readString(value, label, 512);
   if (!/^[A-Za-z0-9_+\-=:.,]+$/.test(id)) throw new HttpError(400, `${label} is invalid.`);
@@ -248,7 +253,7 @@ function parseExportBody(value: unknown): ExportBody {
       workspaceOrVersionId: readId(body.context.workspaceOrVersionId, "Workspace or version ID"),
       elementId: readId(body.context.elementId, "Element ID"),
       server: safeOnshapeOrigin(body.context.server),
-      configuration: readOptionalString(body.context.configuration, "Configuration", 2000),
+      configuration: readOptionalOnshapeParameter(body.context.configuration, "Configuration", 2000),
       onshapeUserId: readOptionalString(body.context.onshapeUserId, "Onshape user ID", 128),
     },
     selection: {
