@@ -4,8 +4,10 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 
 - Select one planar face and export a DXF for laser, plasma, or waterjet cutting.
 - Select one solid part—or any face on that part—and export a STEP file for 3D printing.
+- Store STEP requests with the fixed material value `3d Print`.
 - Create a manual-lathe request without exporting a file by selecting its two planar end faces.
 - Require a friendly name and quantity; DXF and lathe requests also require material and accept an optional subsystem.
+- Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel and aluminum; waterjet supports every listed DXF material.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Record the authenticated Onshape user with every export or manual request.
 - Store generated files in Cloud Storage and every manufacturing record in Firestore.

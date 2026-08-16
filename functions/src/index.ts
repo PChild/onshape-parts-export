@@ -58,8 +58,8 @@ interface ExportBody {
   kind: ExportKind;
   friendlyName: string;
   quantity: number;
-  machiningType: "laser" | "plasma" | "waterjet" | "3d printed" | "lathe";
-  material?: "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+  machiningType: "laser" | "plasma" | "waterjet" | "3D printed" | "lathe";
+  material?: "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
   subsystem?: string;
   context: {
     documentId: string;
@@ -344,9 +344,15 @@ function parseExportBody(value: unknown): ExportBody {
   if (kind === "dxf" && !["laser", "plasma", "waterjet"].includes(String(machining))) {
     throw new HttpError(400, "Choose a valid machining type.");
   }
-  const validDxfMaterials = ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"];
+  const validDxfMaterialsByMachining: Record<"laser" | "plasma" | "waterjet", string[]> = {
+    laser: ["SRPP", "polycarb", "wood"],
+    plasma: ["steel", "aluminum"],
+    waterjet: ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"],
+  };
   const validLatheMaterials = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
-  if (kind === "dxf" && !validDxfMaterials.includes(String(body.material))) throw new HttpError(400, "Choose a valid material.");
+  if (kind === "dxf" && !validDxfMaterialsByMachining[machining as "laser" | "plasma" | "waterjet"].includes(String(body.material))) {
+    throw new HttpError(400, `Choose a material that can be cut by ${machining}.`);
+  }
   if (kind === "lathe" && !validLatheMaterials.includes(String(body.material))) throw new HttpError(400, "Choose Aluminum 7075, Polycarb, Steel, or Carbon Fiber for the lathe material.");
   const wv = body.context.workspaceOrVersion;
   if (wv !== "w" && wv !== "v") throw new HttpError(400, "Invalid workspace or version type.");
@@ -356,7 +362,7 @@ function parseExportBody(value: unknown): ExportBody {
     friendlyName: readString(body.friendlyName, "Friendly name", 80),
     quantity,
     machiningType: machining as ExportBody["machiningType"],
-    material: kind === "dxf" || kind === "lathe" ? body.material : undefined,
+    material: kind === "step" ? "3D Print" : body.material,
     subsystem: kind === "dxf" || kind === "lathe" ? readOptionalString(body.subsystem, "Subsystem", 80) : undefined,
     context: {
       documentId: readId(body.context.documentId, "Document ID"),

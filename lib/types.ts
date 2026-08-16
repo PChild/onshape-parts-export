@@ -1,6 +1,6 @@
 export type ExportKind = "dxf" | "step" | "lathe";
 export type MachiningType = "laser" | "plasma" | "waterjet" | "3d printed" | "lathe";
-export type Material = "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+export type Material = "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
 export type LatheStockType =
   | "1/2 true hex"
   | "1/2 rounded hex"

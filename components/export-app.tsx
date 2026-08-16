@@ -13,7 +13,13 @@ import type {
   SessionUser,
 } from "@/lib/types";
 
-const dxfMaterials: Material[] = ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"];
+type DxfMachiningType = "laser" | "plasma" | "waterjet";
+
+const dxfMaterialsByMachining: Record<DxfMachiningType, Material[]> = {
+  laser: ["SRPP", "polycarb", "wood"],
+  plasma: ["steel", "aluminum"],
+  waterjet: ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"],
+};
 const latheMaterials: Material[] = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
 const latheStockTypes: LatheStockType[] = [
   "1/2 true hex",
@@ -124,7 +130,7 @@ export function ExportApp() {
   const [disconnecting, setDisconnecting] = useState(false);
   const [friendlyName, setFriendlyName] = useState("");
   const [quantity, setQuantity] = useState(1);
-  const [machining, setMachining] = useState<"laser" | "plasma" | "waterjet">("laser");
+  const [machining, setMachining] = useState<DxfMachiningType>("laser");
   const [material, setMaterial] = useState<Material>("wood");
   const [subsystem, setSubsystem] = useState("");
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
@@ -213,9 +219,18 @@ export function ExportApp() {
     if (context && selecting) postToOnshape(context, { messageName: "stopRequest" });
     setKind(next);
     if (next === "lathe" && !latheMaterials.includes(material)) setMaterial("aluminum 7075");
-    if (next === "dxf" && !dxfMaterials.includes(material)) setMaterial("aluminum");
+    if (next === "dxf" && !dxfMaterialsByMachining[machining].includes(material)) {
+      setMaterial(dxfMaterialsByMachining[machining][0]);
+    }
     setSelections([]);
     setSelecting(false);
+    setSubmission("idle");
+    setMessage("");
+  };
+
+  const changeMachining = (next: DxfMachiningType) => {
+    setMachining(next);
+    if (!dxfMaterialsByMachining[next].includes(material)) setMaterial(dxfMaterialsByMachining[next][0]);
     setSubmission("idle");
     setMessage("");
   };
@@ -300,7 +315,7 @@ export function ExportApp() {
         friendlyName: friendlyName.trim(),
         quantity,
         machiningType: kind === "step" ? "3d printed" : kind === "lathe" ? "lathe" : machining,
-        material: kind === "dxf" || kind === "lathe" ? material : undefined,
+        material: kind === "step" ? "3D Print" : material,
         subsystem: kind !== "step" && subsystem.trim() ? subsystem.trim() : undefined,
         context,
         selections,
@@ -370,8 +385,9 @@ export function ExportApp() {
             <div className="fields">
               <label className="field span-2"><span>Friendly part name</span><input value={friendlyName} onChange={(e) => setFriendlyName(e.target.value)} placeholder="e.g. Intake side plate" maxLength={80} required /></label>
               <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
-              <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => setMachining(e.target.value as typeof machining)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
-              {kind !== "step" && <><label className="field"><span>Material</span><select value={material} onChange={(e) => setMaterial(e.target.value as Material)}>{(kind === "lathe" ? latheMaterials : dxfMaterials).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label><label className="field"><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="e.g. Drivetrain" maxLength={80} /></label></>}
+              <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
+              {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
+              {kind !== "step" && <><label className="field"><span>Material</span><select value={material} onChange={(e) => setMaterial(e.target.value as Material)}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label><label className="field"><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="e.g. Drivetrain" maxLength={80} /></label></>}
               {kind === "lathe" && <>
                 <label className="field span-2"><span>Stock profile</span><select value={latheStockType} onChange={(event) => changeLatheStock(event.target.value as LatheStockType)}>{latheStockTypes.map((stock) => <option value={stock} key={stock}>{stock.replace(/\b\w/g, (character) => character.toUpperCase())}</option>)}</select></label>
                 {latheStockType === "round shaft" && <label className="field span-2"><span>Shaft diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={latheDiameter ?? ""} onChange={(event) => setLatheDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label>}
