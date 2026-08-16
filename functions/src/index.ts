@@ -27,6 +27,24 @@ const EXPORT_RESULT_POLL_MS = 1_000;
 const PREVIEW_SIZE = 512;
 const METERS_TO_INCHES = 39.37007874015748;
 const ISOMETRIC_VIEW_MATRIX = "0.612,0.612,0,0,-0.354,0.354,0.707,0,0.707,-0.707,0.707,0";
+const DXF_BOUNDS_FEATURESCRIPT = `function(context is Context, queries is map)
+{
+  const selectedFace = queries.face;
+  const facePlane = evPlane(context, { "face" : selectedFace });
+  const normal = facePlane.normal;
+  const reference = abs(normal[2]) < 0.9 ? vector(0, 0, 1) : vector(0, 1, 0);
+  const xDirection = normalize(cross(reference, normal));
+  const faceSystem = coordSystem(facePlane.origin, xDirection, normal);
+  const bounds = evBox3d(context, {
+    "topology" : selectedFace,
+    "cSys" : faceSystem,
+    "tight" : true
+  });
+  return [
+    (bounds.maxCorner[0] - bounds.minCorner[0]) / inch,
+    (bounds.maxCorner[1] - bounds.minCorner[1]) / inch
+  ];
+}`;
 
 type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
@@ -94,6 +112,12 @@ interface ExportBody {
     endB: LatheEndOperation;
     endReference?: string;
   };
+}
+
+interface DxfBounds {
+  widthInches: number;
+  heightInches: number;
+  areaSquareInches: number;
 }
 
 function normalizedConfiguredOrigin(): string {
@@ -683,6 +707,67 @@ async function selectedFaceView(
   return faceViewMatrix(normal);
 }
 
+function featureScriptNumberArray(value: unknown): number[] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const result = (value as { result?: unknown }).result;
+  if (!result || typeof result !== "object") return undefined;
+  const items = (result as { value?: unknown }).value;
+  if (!Array.isArray(items)) return undefined;
+  const numbers = items.map((item) => {
+    if (!item || typeof item !== "object") return Number.NaN;
+    return Number((item as { value?: unknown }).value);
+  });
+  return numbers.every(Number.isFinite) ? numbers : undefined;
+}
+
+function roundedMeasurement(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+async function getDxfFaceBounds(
+  context: ExportBody["context"],
+  selection: ExportBody["selections"][number],
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<DxfBounds> {
+  if (selection.entityType !== "FACE") throw new HttpError(422, "Select a planar face to measure its DXF stock envelope.");
+  const endpoint = new URL(
+    `${session.server}/api/${version}/partstudios/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}/featurescript`,
+  );
+  endpoint.searchParams.set("rollbackBarIndex", "-1");
+  if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+  const response = await authorizedOnshapeFetch(endpoint.toString(), {
+    method: "POST",
+    headers: {
+      Accept: "application/json;charset=UTF-8; qs=0.09",
+      "Content-Type": "application/json;charset=UTF-8; qs=0.09",
+    },
+    body: JSON.stringify({
+      script: DXF_BOUNDS_FEATURESCRIPT,
+      queries: { face: [selection.selectionId] },
+    }),
+  }, session, sessionId);
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not measure the selected DXF face. ${responseText.slice(0, 500)}`.trim());
+  }
+  const payload = (() => {
+    try { return JSON.parse(responseText) as unknown; } catch { return undefined; }
+  })();
+  const dimensions = featureScriptNumberArray(payload);
+  const widthInches = dimensions?.[0];
+  const heightInches = dimensions?.[1];
+  if (!widthInches || !heightInches || widthInches <= 0 || heightInches <= 0) {
+    throw new HttpError(502, "Onshape returned an invalid DXF face measurement.");
+  }
+  return {
+    widthInches: roundedMeasurement(widthInches),
+    heightInches: roundedMeasurement(heightInches),
+    areaSquareInches: roundedMeasurement(widthInches * heightInches),
+  };
+}
+
 async function selectedPartId(
   body: ExportBody,
   session: StoredSession,
@@ -1076,12 +1161,15 @@ async function disconnectSession(req: Request, res: Response): Promise<void> {
 async function handleExportSuggestions(req: Request, res: Response): Promise<void> {
   const { id: sessionId, data: session } = await loadSession(req);
   if (!req.body || typeof req.body !== "object") throw new HttpError(400, "A JSON request body is required.");
-  const raw = req.body as { context?: unknown; selection?: unknown };
+  const raw = req.body as { context?: unknown; selection?: unknown; kind?: unknown };
   const context = parseOnshapeContext(raw.context);
   if (context.server !== session.server) {
     throw new HttpError(400, "The selected document does not match the connected Onshape server.");
   }
   const selection = raw.selection === undefined ? undefined : parseOnshapeSelection(raw.selection);
+  const suggestionKind = raw.kind === undefined ? undefined
+    : raw.kind === "dxf" || raw.kind === "step" || raw.kind === "lathe" ? raw.kind
+      : (() => { throw new HttpError(400, "Invalid export type."); })();
   const version = apiVersion.value().replace(/^\//, "");
 
   const subsystemPromise = (async (): Promise<string | undefined> => {
@@ -1098,31 +1186,44 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     return undefined;
   });
 
-  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean }> => {
+  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean; dxfBounds?: DxfBounds }> => {
     const resolved = await resolveAssemblySelections(context, [selection], session, sessionId, version);
     const sourceContext = resolved.context;
     const sourceSelection = resolved.selections[0];
     const bodies = await getPartStudioBodyDetails({ context: sourceContext }, session, sessionId, version);
     const partId = partIdForSelection(bodies, sourceSelection);
-    if (!partId) return { partMetadataFound: false };
-    const endpoint = new URL(
-      `${session.server}/api/${version}/parts/d/${encodeURIComponent(sourceContext.documentId)}/${sourceContext.workspaceOrVersion}/${encodeURIComponent(sourceContext.workspaceOrVersionId)}/e/${encodeURIComponent(sourceContext.elementId)}`,
-    );
-    if (sourceContext.configuration) endpoint.searchParams.set("configuration", sourceContext.configuration);
-    const response = await authorizedOnshapeFetch(endpoint.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    }, session, sessionId);
-    if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
-    const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
-    if (!Array.isArray(parts)) return { partMetadataFound: false };
-    const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
-    if (!part) return { partMetadataFound: false };
-    const material = suggestedDxfMaterial(part?.material?.displayName, part?.material?.libraryName, part?.material?.id);
-    const friendlyName = cleanSuggestion(part?.name);
-    return { partMetadataFound: true, ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
+    const dxfBoundsPromise = suggestionKind === "dxf" && sourceSelection.entityType === "FACE"
+      ? getDxfFaceBounds(sourceContext, sourceSelection, session, sessionId, version).catch((error: unknown) => {
+          console.warn("Could not measure the selected DXF face.", error);
+          return undefined;
+        })
+      : Promise.resolve(undefined);
+    const metadataPromise = (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean }> => {
+      if (!partId) return { partMetadataFound: false };
+      const endpoint = new URL(
+        `${session.server}/api/${version}/parts/d/${encodeURIComponent(sourceContext.documentId)}/${sourceContext.workspaceOrVersion}/${encodeURIComponent(sourceContext.workspaceOrVersionId)}/e/${encodeURIComponent(sourceContext.elementId)}`,
+      );
+      if (sourceContext.configuration) endpoint.searchParams.set("configuration", sourceContext.configuration);
+      const response = await authorizedOnshapeFetch(endpoint.toString(), {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      }, session, sessionId);
+      if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
+      const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
+      if (!Array.isArray(parts)) return { partMetadataFound: false };
+      const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
+      if (!part) return { partMetadataFound: false };
+      const material = suggestedDxfMaterial(part?.material?.displayName, part?.material?.libraryName, part?.material?.id);
+      const friendlyName = cleanSuggestion(part?.name);
+      return { partMetadataFound: true, ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
+    })().catch((error: unknown) => {
+      console.warn("Could not suggest the selected Onshape part details.", error);
+      return { partMetadataFound: false };
+    });
+    const [dxfBounds, metadata] = await Promise.all([dxfBoundsPromise, metadataPromise]);
+    return { ...metadata, ...(dxfBounds ? { dxfBounds } : {}) };
   })().catch((error: unknown) => {
-    console.warn("Could not suggest the selected Onshape part details.", error);
+    console.warn("Could not resolve the selected Onshape part details.", error);
     return { partMetadataFound: false };
   }) : Promise.resolve({ partMetadataFound: false });
 
@@ -1197,9 +1298,16 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     console.error("Could not create Onshape export preview.", error);
     return undefined;
   });
-  const [{ bytes, contentType }, preview] = await Promise.all([
+  const dxfBoundsPromise = body.kind === "dxf"
+    ? getDxfFaceBounds(body.context, body.selections[0], session, sessionId, version).catch((error: unknown) => {
+        console.error("Could not measure the exported DXF face.", error);
+        return undefined;
+      })
+    : Promise.resolve(undefined);
+  const [{ bytes, contentType }, preview, dxfBounds] = await Promise.all([
     callOnshapeExport(body, session, sessionId, partId, faceView),
     previewPromise,
+    dxfBoundsPromise,
   ]);
   const extension = body.kind;
   const fileName = `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}.${extension}`;
@@ -1223,6 +1331,11 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     ...(body.material ? { material: body.material } : {}),
     ...(body.materialThicknessInches ? { materialThicknessInches: String(body.materialThicknessInches) } : {}),
     ...(body.subsystem ? { subsystem: body.subsystem } : {}),
+    ...(dxfBounds ? {
+      dxfWidthInches: String(dxfBounds.widthInches),
+      dxfHeightInches: String(dxfBounds.heightInches),
+      dxfAreaSquareInches: String(dxfBounds.areaSquareInches),
+    } : {}),
   };
   const uploads: Promise<unknown>[] = [bucket.file(storagePath).save(bytes, {
     resumable: false,
@@ -1255,6 +1368,8 @@ async function handleExport(req: Request, res: Response): Promise<void> {
     byteLength: bytes.length,
     contentType,
     previewStatus: preview ? "complete" : "unavailable",
+    ...(body.kind === "dxf" ? { dxfBoundsStatus: dxfBounds ? "complete" : "unavailable" } : {}),
+    ...(dxfBounds ? { dxfBounds } : {}),
     ...(preview && previewFileName && previewStoragePath ? {
       previewFileName,
       previewStoragePath,

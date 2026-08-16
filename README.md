@@ -8,6 +8,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Create a manual-lathe request without exporting a file by selecting its two planar end faces.
 - Measure and store the lathe part's overall face-to-face length in inches and generate an isometric preview.
 - Require a friendly name and quantity; DXF requests also require material thickness in inches, while DXF and lathe requests require material.
+- Measure the selected DXF face's tight, export-aligned rectangular envelope in inches so students can choose appropriately sized stock.
 - Prefill the editable subsystem field from the Onshape document name for every request, and loosely match a selected DXF part's Onshape material to a supported shop material when possible.
 - Prefill the editable friendly name from the selected Onshape part for STEP and lathe requests.
 - Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel plus Aluminum 6061, 7075, and 5052; waterjet supports every listed DXF material.
@@ -148,6 +149,7 @@ The Storage object includes custom metadata for the request and the `exports/{ex
 - authenticated Onshape user ID, name, and email when available
 - file name, Storage path, MIME type, byte count, status, and server timestamp
 - preview status and, when available, preview file name, Storage path, MIME type, dimensions, and byte count
+- DXF bounding-box status and, when available, `dxfBounds` with width, height, and rectangular area in inches
 
 Lathe requests do not create an exported CAD file. Their material is limited to Aluminum 7075, Polycarb, Steel, or Carbon Fiber. Their Firestore record has `kind: "lathe"`, `machiningType: "lathe"`, a queued status, the resolved owning part ID, `overallLengthInches`, stock dimensions in inches, and the instructions for End A and End B. When available, their preview image is stored alongside the other manufacturing previews.
 
@@ -158,6 +160,7 @@ OAuth opens inside the Onshape application pane. After connecting, the app store
 ## Notes on exports
 
 - DXF requests resolve the selected planar face with the Part Studio body-details API, then use Onshape's document DXF exporter with that face ID and its derived view plane.
+- DXF stock envelopes use a tight FeatureScript bounding box in the same face-plane coordinate system as the export. They describe the minimum axis-aligned rectangle around the exported face and do not include kerf, clamping, or edge-clearance allowance.
 - STEP requests resolve a selected body or face to its owning Part Studio body, then use the Part Studio translation workflow with that deterministic part ID.
 - DXF, STEP, and lathe requests ask Onshape for a 512×512 shaded PNG/JPEG/WebP preview of the selected part. DXF previews use the selected face orientation; STEP and lathe previews use an isometric orientation. Preview failure does not discard an otherwise valid manufacturing request.
 - Lathe requests verify that both selected end faces are planar, parallel, and belong to one Part Studio body. Their plane separation is converted from Onshape model units to `overallLengthInches`. The app uses the known dimensions of fixed hex stock and asks for round-stock dimensions instead of guessing them from model topology.

@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncEx
 import { createExport, disconnectSession, getApiBase, getExportSuggestions, getSession } from "@/lib/api";
 import { postToOnshape, readOnshapeContext, selectionsFromMessage } from "@/lib/onshape";
 import type {
+  DxfBounds,
   ExportKind,
   LatheEndOperation,
   LatheStockType,
@@ -39,6 +40,10 @@ const latheStockTypes: LatheStockType[] = [
   "round shaft",
   "round tube",
 ];
+
+function formatInches(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
 const SESSION_KEY = "shop-export-session";
 const THEME_KEY = "shop-export-theme";
 
@@ -168,6 +173,11 @@ export function ExportApp() {
   const machiningRef = useRef<DxfMachiningType>("laser");
   const [material, setMaterial] = useState<Material>("wood");
   const [materialThickness, setMaterialThickness] = useState<number | undefined>();
+  const [dxfBoundsResult, setDxfBoundsResult] = useState<{
+    requestKey: string;
+    status: "complete" | "unavailable";
+    bounds?: DxfBounds;
+  } | null>(null);
   const [subsystem, setSubsystem] = useState("");
   const materialEdited = useRef(false);
   const machiningEdited = useRef(false);
@@ -350,6 +360,19 @@ export function ExportApp() {
         ...(suggestionSelection.occurrencePath ?? []),
       ].join(":")
     : "";
+  const suggestionRequestKey = [
+    context?.documentId ?? "",
+    context?.workspaceOrVersionId ?? "",
+    context?.elementId ?? "",
+    sessionToken,
+    kind,
+    suggestionSelectionKey,
+  ].join(":");
+  const currentDxfBoundsResult = dxfBoundsResult?.requestKey === suggestionRequestKey ? dxfBoundsResult : undefined;
+  const dxfBounds = currentDxfBoundsResult?.bounds;
+  const dxfBoundsStatus = kind !== "dxf" || !suggestionSelection || !context || !sessionToken
+    ? "idle"
+    : currentDxfBoundsResult?.status ?? "loading";
   useEffect(() => {
     const selectionChanged = suggestionSelectionKey !== lastSuggestionSelectionKey.current;
     if (selectionChanged) {
@@ -358,21 +381,14 @@ export function ExportApp() {
       materialEdited.current = false;
       machiningEdited.current = false;
     }
-    const requestKey = [
-      context?.documentId ?? "",
-      context?.workspaceOrVersionId ?? "",
-      context?.elementId ?? "",
-      sessionToken,
-      kind,
-      suggestionSelectionKey,
-    ].join(":");
-    if (requestKey === lastSuggestionRequestKey.current) return;
-    lastSuggestionRequestKey.current = requestKey;
+    if (suggestionRequestKey === lastSuggestionRequestKey.current) return;
+    lastSuggestionRequestKey.current = suggestionRequestKey;
     const requestNumber = ++suggestionRequest.current;
     if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
     const suggestionRequestBody = {
       context,
       selection: suggestionSelection,
+      kind,
     };
     const loadSuggestions = async () => {
       try {
@@ -391,6 +407,13 @@ export function ExportApp() {
     void loadSuggestions().then((suggestions) => {
       if (!suggestions) return;
       if (requestNumber !== suggestionRequest.current) return;
+      if (kind === "dxf" && suggestionSelection) {
+        setDxfBoundsResult({
+          requestKey: suggestionRequestKey,
+          status: suggestions.dxfBounds ? "complete" : "unavailable",
+          bounds: suggestions.dxfBounds,
+        });
+      }
       if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
       const metadataMissing = Boolean(suggestionSelection)
         && suggestions.partMetadataFound !== true
@@ -419,10 +442,13 @@ export function ExportApp() {
       setMaterial(suggestedMaterial && supportedMaterials.includes(suggestedMaterial) ? suggestedMaterial : supportedMaterials[0]);
     }).catch(() => {
       if (requestNumber === suggestionRequest.current) {
+        if (kind === "dxf" && suggestionSelection) {
+          setDxfBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+        }
         setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
       }
     });
-  }, [context, suggestionSelection, suggestionSelectionKey, kind, sessionToken]);
+  }, [context, suggestionSelection, suggestionSelectionKey, suggestionRequestKey, kind, sessionToken]);
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -539,6 +565,14 @@ export function ExportApp() {
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
               {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { materialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
               {kind === "dxf" && <label className={`field ${materialThicknessComplete ? "" : "missing"}`}><span>Material thickness <em>in</em></span><input aria-invalid={!materialThicknessComplete} type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
+              {kind === "dxf" && suggestionSelection && <div className={`stock-envelope span-2 ${dxfBoundsStatus}`} aria-live="polite">
+                <div><span>DXF stock envelope</span>{dxfBounds
+                  ? <strong>{formatInches(dxfBounds.widthInches)} × {formatInches(dxfBounds.heightInches)} in</strong>
+                  : <strong>{dxfBoundsStatus === "loading" ? "Measuring selected face…" : dxfBoundsStatus === "idle" ? "Connect to measure" : "Measurement unavailable"}</strong>}</div>
+                <p>{dxfBounds
+                  ? `${dxfBounds.areaSquareInches.toLocaleString(undefined, { maximumFractionDigits: 2 })} in² minimum rectangular area. Choose stock larger than this envelope for edge clearance.`
+                  : "This estimate is optional and does not block the export."}</p>
+              </div>}
               <label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => { subsystemEdited.current = true; setSubsystem(e.target.value); }} placeholder="Defaults to the Onshape document name" maxLength={80} /></label>
               {kind === "lathe" && <>
                 <label className="field span-2"><span>Stock profile</span><select value={latheStockType} onChange={(event) => changeLatheStock(event.target.value as LatheStockType)}>{latheStockTypes.map((stock) => <option value={stock} key={stock}>{stock.replace(/\b\w/g, (character) => character.toUpperCase())}</option>)}</select></label>

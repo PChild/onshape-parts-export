@@ -76,9 +76,16 @@ export interface ExportResult {
   previewStoragePath?: string;
 }
 
+export interface DxfBounds {
+  widthInches: number;
+  heightInches: number;
+  areaSquareInches: number;
+}
+
 export interface ExportSuggestionsRequest {
   context: OnshapeContext;
   selection?: OnshapeSelection;
+  kind?: ExportKind;
 }
 
 export interface ExportSuggestionsResult {
@@ -86,4 +93,5 @@ export interface ExportSuggestionsResult {
   material?: Material;
   friendlyName?: string;
   partMetadataFound?: boolean;
+  dxfBounds?: DxfBounds;
 }
