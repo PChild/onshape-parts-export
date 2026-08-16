@@ -122,15 +122,16 @@ function EndOperationFields({
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const update = (changes: Partial<LatheEndOperation>) => onChange({ ...value, ...changes });
   const operationLabel = value.operation.replace(/\b\w/g, (character) => character.toUpperCase());
+  const incomplete = !endOperationComplete(value);
   return (
-    <details className="end-operation" open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
+    <details className={`end-operation ${incomplete ? "missing" : ""}`} open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
       <summary><span><strong>{title}</strong><small>{subtitle} · {operationLabel}</small></span></summary>
       <div className="end-operation-fields">
         <label className="field span-2"><span>Operation</span><select value={value.operation} onChange={(event) => onChange(defaultEndOperation(event.target.value as LatheEndOperation["operation"]))}><option value="leave as modeled">Leave as modeled</option><option value="turn down">Turn down for bearing</option><option value="tap">Tap</option><option value="drill">Drill</option><option value="other">Other</option></select></label>
-        {value.operation === "turn down" && <><label className="field"><span>Target diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.375" required /></label><label className="field"><span>Turned length <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.lengthInches ?? ""} onChange={(event) => update({ lengthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.5" required /></label></>}
-        {value.operation === "tap" && <><label className="field"><span>Thread</span><input value={value.thread ?? ""} onChange={(event) => update({ thread: event.target.value })} placeholder="e.g. 1/4-20" maxLength={40} required /></label><label className="field"><span>Thread depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.75" required /></label></>}
-        {value.operation === "drill" && <><label className="field"><span>Hole diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.25" required /></label><label className="field"><span>Hole depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 1.0" required /></label></>}
-        {value.operation === "other" && <label className="field span-2"><span>Instructions</span><textarea value={value.notes ?? ""} onChange={(event) => update({ notes: event.target.value })} placeholder="Describe the operation and dimensions" maxLength={300} required /></label>}
+        {value.operation === "turn down" && <><label className={`field ${positive(value.diameterInches) ? "" : "missing"}`}><span>Target diameter <em>in</em></span><input aria-invalid={!positive(value.diameterInches)} type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.375" required /></label><label className={`field ${positive(value.lengthInches) ? "" : "missing"}`}><span>Turned length <em>in</em></span><input aria-invalid={!positive(value.lengthInches)} type="number" min="0.001" max="100" step="any" value={value.lengthInches ?? ""} onChange={(event) => update({ lengthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.5" required /></label></>}
+        {value.operation === "tap" && <><label className={`field ${value.thread?.trim() ? "" : "missing"}`}><span>Thread</span><input aria-invalid={!value.thread?.trim()} value={value.thread ?? ""} onChange={(event) => update({ thread: event.target.value })} placeholder="e.g. 1/4-20" maxLength={40} required /></label><label className={`field ${positive(value.depthInches) ? "" : "missing"}`}><span>Thread depth <em>in</em></span><input aria-invalid={!positive(value.depthInches)} type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.75" required /></label></>}
+        {value.operation === "drill" && <><label className={`field ${positive(value.diameterInches) ? "" : "missing"}`}><span>Hole diameter <em>in</em></span><input aria-invalid={!positive(value.diameterInches)} type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.25" required /></label><label className={`field ${positive(value.depthInches) ? "" : "missing"}`}><span>Hole depth <em>in</em></span><input aria-invalid={!positive(value.depthInches)} type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 1.0" required /></label></>}
+        {value.operation === "other" && <label className={`field span-2 ${value.notes?.trim() ? "" : "missing"}`}><span>Instructions</span><textarea aria-invalid={!value.notes?.trim()} value={value.notes ?? ""} onChange={(event) => update({ notes: event.target.value })} placeholder="Describe the operation and dimensions" maxLength={300} required /></label>}
       </div>
     </details>
   );
@@ -164,6 +165,7 @@ export function ExportApp() {
   const friendlyNameEdited = useRef(false);
   const [quantity, setQuantity] = useState(1);
   const [machining, setMachining] = useState<DxfMachiningType>("laser");
+  const machiningRef = useRef<DxfMachiningType>("laser");
   const [material, setMaterial] = useState<Material>("wood");
   const [materialThickness, setMaterialThickness] = useState<number | undefined>();
   const [subsystem, setSubsystem] = useState("");
@@ -172,6 +174,7 @@ export function ExportApp() {
   const subsystemEdited = useRef(false);
   const suggestionRequest = useRef(0);
   const lastSuggestionSelectionKey = useRef("");
+  const lastSuggestionRequestKey = useRef("");
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
   const [latheDiameter, setLatheDiameter] = useState<number | undefined>();
   const [tubeOuterDiameter, setTubeOuterDiameter] = useState<number | undefined>();
@@ -289,6 +292,7 @@ export function ExportApp() {
 
   const changeMachining = (next: DxfMachiningType) => {
     machiningEdited.current = true;
+    machiningRef.current = next;
     setMachining(next);
     if (!dxfMaterialsByMachining[next].includes(material)) setMaterial(dxfMaterialsByMachining[next][0]);
     setSubmission("idle");
@@ -353,53 +357,72 @@ export function ExportApp() {
       friendlyNameEdited.current = false;
       materialEdited.current = false;
       machiningEdited.current = false;
-      queueMicrotask(() => {
-        if (lastSuggestionSelectionKey.current !== suggestionSelectionKey) return;
-        setFriendlyName("");
-        if (kind === "lathe") setMaterial("aluminum 7075");
-        if (kind === "dxf") setMaterial(dxfMaterialsByMachining[machining][0]);
-      });
     }
+    const requestKey = [
+      context?.documentId ?? "",
+      context?.workspaceOrVersionId ?? "",
+      context?.elementId ?? "",
+      sessionToken,
+      kind,
+      suggestionSelectionKey,
+    ].join(":");
+    if (requestKey === lastSuggestionRequestKey.current) return;
+    lastSuggestionRequestKey.current = requestKey;
     const requestNumber = ++suggestionRequest.current;
     if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
-    getExportSuggestions(sessionToken, {
+    const suggestionRequestBody = {
       context,
       selection: suggestionSelection,
-    }).then((suggestions) => {
+    };
+    const loadSuggestions = async () => {
+      try {
+        const first = await getExportSuggestions(sessionToken, suggestionRequestBody);
+        const metadataMissing = Boolean(suggestionSelection)
+          && first.partMetadataFound !== true
+          && !first.friendlyName
+          && !first.material;
+        if (!metadataMissing) return first;
+      } catch {
+        // Retry once below. Selection changes invalidate this request number.
+      }
+      if (requestNumber !== suggestionRequest.current) return undefined;
+      return getExportSuggestions(sessionToken, suggestionRequestBody);
+    };
+    void loadSuggestions().then((suggestions) => {
+      if (!suggestions) return;
       if (requestNumber !== suggestionRequest.current) return;
       if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
-      if (!friendlyNameEdited.current && suggestions.friendlyName) {
-        setFriendlyName(suggestions.friendlyName);
+      const metadataMissing = Boolean(suggestionSelection)
+        && suggestions.partMetadataFound !== true
+        && !suggestions.friendlyName
+        && !suggestions.material;
+      if (metadataMissing) {
+        setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
+        return;
       }
+      if (suggestionSelection) setMessage("");
+      if (!friendlyNameEdited.current) setFriendlyName(suggestions.friendlyName ?? "");
       const suggestedMaterial = suggestions.material;
-      if (!suggestedMaterial || materialEdited.current) return;
+      if (materialEdited.current) return;
       if (kind === "lathe") {
-        if (latheMaterials.includes(suggestedMaterial)) setMaterial(suggestedMaterial);
+        setMaterial(suggestedMaterial && latheMaterials.includes(suggestedMaterial) ? suggestedMaterial : "aluminum 7075");
         return;
       }
       if (kind !== "dxf") return;
-      if (suggestedMaterial.startsWith("aluminum ")) {
-        if (!machiningEdited.current) {
-          setMachining("waterjet");
-          setMaterial(suggestedMaterial);
-        } else if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
-          setMaterial(suggestedMaterial);
-        }
-        return;
+      let targetMachining = machiningRef.current;
+      if (!machiningEdited.current) {
+        targetMachining = suggestedMaterial ? preferredMachiningByMaterial[suggestedMaterial] ?? "laser" : "laser";
+        machiningRef.current = targetMachining;
+        setMachining(targetMachining);
       }
-      if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
-        setMaterial(suggestedMaterial);
-        return;
-      }
-      const preferredMachining = preferredMachiningByMaterial[suggestedMaterial];
-      if (!machiningEdited.current && preferredMachining) {
-        setMachining(preferredMachining);
-        setMaterial(suggestedMaterial);
-      }
+      const supportedMaterials = dxfMaterialsByMachining[targetMachining];
+      setMaterial(suggestedMaterial && supportedMaterials.includes(suggestedMaterial) ? suggestedMaterial : supportedMaterials[0]);
     }).catch(() => {
-      // Suggestions are best-effort and should never block a manual export.
+      if (requestNumber === suggestionRequest.current) {
+        setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
+      }
     });
-  }, [context, suggestionSelection, suggestionSelectionKey, kind, machining, sessionToken]);
+  }, [context, suggestionSelection, suggestionSelectionKey, kind, sessionToken]);
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -410,20 +433,24 @@ export function ExportApp() {
     return stockComplete && endOperationComplete(endA) && endOperationComplete(endB);
   }, [endA, endB, latheDiameter, latheStockType, tubeInnerDiameter, tubeOuterDiameter]);
 
+  const selectionComplete = selections.length === requiredSelectionCount;
+  const friendlyNameComplete = Boolean(friendlyName.trim());
+  const quantityComplete = Number.isInteger(quantity) && quantity >= 1 && quantity <= 999;
+  const materialThicknessComplete = kind !== "dxf" || positive(materialThickness);
+  const accountComplete = Boolean(user && sessionToken);
+
   const canSubmit = useMemo(
     () => Boolean(
       context
-      && selections.length === requiredSelectionCount
-      && friendlyName.trim()
-      && Number.isInteger(quantity)
-      && quantity > 0
-      && user
-      && sessionToken
+      && selectionComplete
+      && friendlyNameComplete
+      && quantityComplete
+      && accountComplete
       && submission !== "working"
-      && (kind !== "dxf" || positive(materialThickness))
+      && materialThicknessComplete
       && (kind !== "lathe" || latheDetailsComplete),
     ),
-    [context, selections.length, requiredSelectionCount, friendlyName, quantity, user, sessionToken, submission, kind, materialThickness, latheDetailsComplete],
+    [context, selectionComplete, friendlyNameComplete, quantityComplete, accountComplete, submission, materialThicknessComplete, kind, latheDetailsComplete],
   );
 
   const submit = async (event: FormEvent) => {
@@ -491,14 +518,14 @@ export function ExportApp() {
         </div>
 
         <form onSubmit={submit}>
-          <section className="card selection-card">
+          <section className={`card selection-card ${selectionComplete ? "" : "missing"}`}>
             <div className="step-number">1</div>
             <div className="card-copy">
               <h2>Select {kind === "dxf" ? "a planar face" : kind === "step" ? "a part or any face on it" : "the two end faces"}</h2>
               <p>{kind === "dxf" ? "Choose the face that should lie flat on the machine bed." : kind === "step" ? "Choose one solid body, or click any face belonging to that body." : "Choose both planar end faces of the same shaft or tube. The first face becomes End A and the second becomes End B."}</p>
             </div>
-            <button className={`select-button ${selections.length === requiredSelectionCount ? "selected" : ""}`} type="button" onClick={() => selectTarget()} disabled={!context}>
-              {selections.length === requiredSelectionCount ? <><CheckIcon /> Selected</> : selecting ? `${selections.length} of ${requiredSelectionCount} selected…` : `Select ${kind === "dxf" ? "face" : kind === "step" ? "part or face" : selections.length === 1 ? "End B" : "two faces"}`}
+            <button className={`select-button ${selectionComplete ? "selected" : "missing"}`} type="button" onClick={() => selectTarget()} disabled={!context}>
+              {selectionComplete ? <><CheckIcon /> Selected</> : selecting ? `${selections.length} of ${requiredSelectionCount} selected…` : `Select ${kind === "dxf" ? "face" : kind === "step" ? "part or face" : selections.length === 1 ? "End B" : "two faces"}`}
             </button>
             {selections.map((selection, index) => <div className="selection-detail" key={`${selection.entityType}:${selection.selectionId}`}><span>{kind === "lathe" ? `End ${index === 0 ? "A" : "B"}` : selection.entityType === "BODY" ? "Part" : "Face"}</span><code>{selection.name ?? selection.selectionId}</code>{index === 0 && <button type="button" onClick={() => selectTarget(true)}>Change</button>}</div>)}
           </section>
@@ -506,23 +533,23 @@ export function ExportApp() {
           <section className="card details-card">
             <div className="section-heading"><div className="step-number">2</div><div><h2>Manufacturing details</h2><p>{kind === "lathe" ? "These details become the manual machining request." : "These details travel with the exported file."}</p></div></div>
             <div className="fields">
-              <label className="field span-2"><span>Friendly part name</span><input value={friendlyName} onChange={(e) => { friendlyNameEdited.current = true; setFriendlyName(e.target.value); }} placeholder={kind === "dxf" ? "e.g. Intake side plate" : "Defaults to the selected part name"} maxLength={80} required /></label>
-              <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
+              <label className={`field span-2 ${friendlyNameComplete ? "" : "missing"}`}><span>Friendly part name</span><input aria-invalid={!friendlyNameComplete} value={friendlyName} onChange={(e) => { friendlyNameEdited.current = true; setFriendlyName(e.target.value); }} placeholder={kind === "dxf" ? "e.g. Intake side plate" : "Defaults to the selected part name"} maxLength={80} required /></label>
+              <label className={`field ${quantityComplete ? "" : "missing"}`}><span>Quantity</span><input aria-invalid={!quantityComplete} type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
               {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { materialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
-              {kind === "dxf" && <label className="field"><span>Material thickness <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
+              {kind === "dxf" && <label className={`field ${materialThicknessComplete ? "" : "missing"}`}><span>Material thickness <em>in</em></span><input aria-invalid={!materialThicknessComplete} type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
               <label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => { subsystemEdited.current = true; setSubsystem(e.target.value); }} placeholder="Defaults to the Onshape document name" maxLength={80} /></label>
               {kind === "lathe" && <>
                 <label className="field span-2"><span>Stock profile</span><select value={latheStockType} onChange={(event) => changeLatheStock(event.target.value as LatheStockType)}>{latheStockTypes.map((stock) => <option value={stock} key={stock}>{stock.replace(/\b\w/g, (character) => character.toUpperCase())}</option>)}</select></label>
-                {latheStockType === "round shaft" && <label className="field span-2"><span>Shaft diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={latheDiameter ?? ""} onChange={(event) => setLatheDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label>}
-                {latheStockType === "round tube" && <><label className="field"><span>Outside diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={tubeOuterDiameter ?? ""} onChange={(event) => setTubeOuterDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.75" required /></label><label className="field"><span>Inside diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={tubeInnerDiameter ?? ""} onChange={(event) => setTubeInnerDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label></>}
+                {latheStockType === "round shaft" && <label className={`field span-2 ${positive(latheDiameter) ? "" : "missing"}`}><span>Shaft diameter <em>in</em></span><input aria-invalid={!positive(latheDiameter)} type="number" min="0.001" max="100" step="any" value={latheDiameter ?? ""} onChange={(event) => setLatheDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label>}
+                {latheStockType === "round tube" && <><label className={`field ${positive(tubeOuterDiameter) ? "" : "missing"}`}><span>Outside diameter <em>in</em></span><input aria-invalid={!positive(tubeOuterDiameter)} type="number" min="0.001" max="100" step="any" value={tubeOuterDiameter ?? ""} onChange={(event) => setTubeOuterDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.75" required /></label><label className={`field ${positive(tubeInnerDiameter) && positive(tubeOuterDiameter) && tubeInnerDiameter! < tubeOuterDiameter! ? "" : "missing"}`}><span>Inside diameter <em>in</em></span><input aria-invalid={!(positive(tubeInnerDiameter) && positive(tubeOuterDiameter) && tubeInnerDiameter! < tubeOuterDiameter!)} type="number" min="0.001" max="100" step="any" value={tubeInnerDiameter ?? ""} onChange={(event) => setTubeInnerDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label></>}
               </>}
             </div>
             {kind === "lathe" && <div className="lathe-ends"><EndOperationFields title="End A" subtitle="First selected face" value={endA} onChange={setEndA} defaultOpen /><EndOperationFields title="End B" subtitle="Second selected face" value={endB} onChange={setEndB} /><label className="field"><span>Extra notes <em>optional</em></span><textarea value={endReference} onChange={(event) => setEndReference(event.target.value)} placeholder="e.g. Break all edges" maxLength={300} /></label></div>}
           </section>
 
-          <section className="identity-row">
+          <section className={`identity-row ${accountComplete ? "" : "missing"}`}>
             <div className="avatar">{user ? user.name.slice(0, 1).toUpperCase() : "?"}</div>
             <div><span>Requested by</span><strong>{user?.name ?? "Onshape account not connected"}</strong></div>
             {user

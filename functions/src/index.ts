@@ -1098,13 +1098,13 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     return undefined;
   });
 
-  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string }> => {
+  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string; partMetadataFound: boolean }> => {
     const resolved = await resolveAssemblySelections(context, [selection], session, sessionId, version);
     const sourceContext = resolved.context;
     const sourceSelection = resolved.selections[0];
     const bodies = await getPartStudioBodyDetails({ context: sourceContext }, session, sessionId, version);
     const partId = partIdForSelection(bodies, sourceSelection);
-    if (!partId) return {};
+    if (!partId) return { partMetadataFound: false };
     const endpoint = new URL(
       `${session.server}/api/${version}/parts/d/${encodeURIComponent(sourceContext.documentId)}/${sourceContext.workspaceOrVersion}/${encodeURIComponent(sourceContext.workspaceOrVersionId)}/e/${encodeURIComponent(sourceContext.elementId)}`,
     );
@@ -1115,15 +1115,16 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     }, session, sessionId);
     if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
     const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
-    if (!Array.isArray(parts)) return {};
+    if (!Array.isArray(parts)) return { partMetadataFound: false };
     const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
+    if (!part) return { partMetadataFound: false };
     const material = suggestedDxfMaterial(part?.material?.displayName, part?.material?.libraryName, part?.material?.id);
     const friendlyName = cleanSuggestion(part?.name);
-    return { ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
+    return { partMetadataFound: true, ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
   })().catch((error: unknown) => {
     console.warn("Could not suggest the selected Onshape part details.", error);
-    return {};
-  }) : Promise.resolve({});
+    return { partMetadataFound: false };
+  }) : Promise.resolve({ partMetadataFound: false });
 
   const [subsystem, partSuggestions] = await Promise.all([subsystemPromise, partSuggestionsPromise]);
   res.json({ ...(subsystem ? { subsystem } : {}), ...partSuggestions });

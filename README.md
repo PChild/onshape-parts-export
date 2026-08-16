@@ -16,6 +16,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Keep the two lathe end-operation sections collapsible for smaller classroom screens.
 - Adopt face selections made while the panel is open, preserve compatible selections when switching processes, and reuse one selected face as Lathe End A.
+- Highlight every missing required selection, input, lathe operation, and account connection that is blocking submission.
 - Record the authenticated Onshape user with every export or manual request.
 - Store generated files in Cloud Storage and every manufacturing record in Firestore.
 - Follow the browser color scheme on first use, with a remembered light/dark override.

@@ -85,4 +85,5 @@ export interface ExportSuggestionsResult {
   subsystem?: string;
   material?: Material;
   friendlyName?: string;
+  partMetadataFound?: boolean;
 }

@@ -81,6 +81,8 @@ form { display: grid; gap: 12px; }
 .select-button:hover { background: var(--accent-soft); }
 .select-button:disabled { opacity: .45; cursor: not-allowed; }
 .select-button.selected { display: flex; align-items: center; gap: 5px; border-color: transparent; background: var(--accent-soft); }
+.selection-card.missing { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); }
+.select-button.missing { border-color: var(--warning); color: var(--warning); background: var(--warning-soft); }
 .select-button svg { width: 14px; height: 14px; stroke-width: 2.4; }
 .selection-detail { grid-column: 2 / 4; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px 10px; background: var(--surface-soft); border-radius: 7px; }
 .selection-detail span { padding: 3px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-strong); font-size: 9px; font-weight: 750; text-transform: uppercase; }
@@ -93,15 +95,22 @@ form { display: grid; gap: 12px; }
 .field.span-2 { grid-column: span 2; }
 .field > span { color: var(--muted); font-size: 10px; font-weight: 680; letter-spacing: .015em; }
 .field em { color: var(--faint); font-style: normal; font-weight: 450; }
+.field.missing > span { color: var(--warning); }
+.field.missing > span::after { content: "Needed"; margin-left: 6px; padding: 1px 4px; border-radius: 3px; color: var(--warning); background: var(--warning-soft); font-size: 8px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
 input, select, textarea, .fixed-value { width: 100%; height: 38px; padding: 0 10px; color: var(--text); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 7px; outline: none; font-size: 12px; }
 textarea { min-height: 72px; padding-top: 9px; padding-bottom: 9px; resize: vertical; line-height: 1.4; }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.field.missing > :is(input, select, textarea) { border-color: color-mix(in srgb, var(--warning) 70%, var(--line)); background: color-mix(in srgb, var(--warning-soft) 65%, var(--surface-soft)); }
+.field.missing > :is(input, select, textarea):focus { border-color: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 20%, transparent); }
 input::placeholder { color: var(--faint); }
 .fixed-value { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .fixed-value svg { width: 15px; height: 15px; color: var(--accent); }
 
 .lathe-ends { display: grid; gap: 12px; padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--line); }
 .end-operation { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); overflow: hidden; }
+.end-operation.missing { border-color: color-mix(in srgb, var(--warning) 65%, var(--line)); }
+.end-operation.missing summary strong { color: var(--warning); }
+.end-operation.missing summary small::after { content: " · Needs input"; color: var(--warning); font-weight: 700; }
 .end-operation summary { min-height: 44px; padding: 10px 12px; display: flex; align-items: center; cursor: pointer; list-style: none; }
 .end-operation summary::-webkit-details-marker { display: none; }
 .end-operation summary::after { content: "›"; margin-left: auto; color: var(--faint); font-size: 20px; line-height: 1; transform: rotate(90deg); transition: transform .15s ease; }
@@ -112,6 +121,7 @@ input::placeholder { color: var(--faint); }
 .end-operation-fields { padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; border-top: 1px solid var(--line); }
 
 .identity-row { min-height: 54px; padding: 7px 10px; display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.identity-row.missing { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); background: color-mix(in srgb, var(--warning-soft) 45%, var(--surface)); }
 .avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; color: var(--accent-strong); background: var(--accent-soft); font-weight: 750; }
 .identity-row > div:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .identity-row span { color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
