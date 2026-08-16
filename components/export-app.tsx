@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { createExport, disconnectSession, getApiBase, getSession } from "@/lib/api";
+import { createExport, disconnectSession, getApiBase, getExportSuggestions, getSession } from "@/lib/api";
 import { postToOnshape, readOnshapeContext, selectionsFromMessage } from "@/lib/onshape";
 import type {
   ExportKind,
@@ -21,6 +21,14 @@ const dxfMaterialsByMachining: Record<DxfMachiningType, Material[]> = {
   waterjet: ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"],
 };
 const latheMaterials: Material[] = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
+const preferredMachiningByMaterial: Partial<Record<Material, DxfMachiningType>> = {
+  wood: "laser",
+  polycarb: "laser",
+  SRPP: "laser",
+  aluminum: "plasma",
+  steel: "plasma",
+  "carbon fiber": "waterjet",
+};
 const latheStockTypes: LatheStockType[] = [
   "1/2 true hex",
   "1/2 rounded hex",
@@ -117,6 +125,7 @@ export function ExportApp() {
   const [selecting, setSelecting] = useState(false);
   const allowedSelectionTypes = useRef<readonly OnshapeSelection["entityType"][]>(["FACE"]);
   const expectedSelectionCount = useRef(1);
+  const selectionRequestActive = useRef(false);
   const [themeOverride, setThemeOverride] = useState<Theme | null>(null);
   const theme = useMemo<Theme>(() => {
     if (themeOverride) return themeOverride;
@@ -134,6 +143,10 @@ export function ExportApp() {
   const [material, setMaterial] = useState<Material>("wood");
   const [materialThickness, setMaterialThickness] = useState<number | undefined>();
   const [subsystem, setSubsystem] = useState("");
+  const dxfMaterialEdited = useRef(false);
+  const machiningEdited = useRef(false);
+  const subsystemEdited = useRef(false);
+  const suggestionRequest = useRef(0);
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
   const [latheDiameter, setLatheDiameter] = useState<number | undefined>();
   const [tubeOuterDiameter, setTubeOuterDiameter] = useState<number | undefined>();
@@ -186,11 +199,20 @@ export function ExportApp() {
     postToOnshape(context, { messageName: "applicationInit" });
     const handler = (event: MessageEvent) => {
       if (event.origin !== context.server) return;
+      if (!selectionRequestActive.current) return;
       const parsed = selectionsFromMessage(event.data, allowedSelectionTypes.current);
       if (parsed.length) {
-        const accepted = parsed.slice(0, expectedSelectionCount.current);
-        setSelections(accepted);
-        setSelecting(accepted.length < expectedSelectionCount.current);
+        setSelections((current) => {
+          const count = expectedSelectionCount.current;
+          const candidates = count > 1 ? [...current, ...parsed] : parsed;
+          const accepted = candidates.filter((selection, index, all) =>
+            all.findIndex((candidate) => candidate.entityType === selection.entityType && candidate.selectionId === selection.selectionId) === index,
+          ).slice(0, count);
+          const pending = accepted.length < count;
+          selectionRequestActive.current = pending;
+          setSelecting(pending);
+          return accepted;
+        });
       }
     };
     window.addEventListener("message", handler);
@@ -199,12 +221,14 @@ export function ExportApp() {
 
   const selectTarget = useCallback(() => {
     if (!context) return;
+    if (selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
     const entityTypes: readonly OnshapeSelection["entityType"][] = kind === "dxf"
       ? ["FACE"]
       : kind === "step" ? ["BODY", "FACE"] : ["FACE"];
     const selectionCount = kind === "lathe" ? 2 : 1;
     allowedSelectionTypes.current = entityTypes;
     expectedSelectionCount.current = selectionCount;
+    selectionRequestActive.current = true;
     setSelections([]);
     setSelecting(true);
     setMessage("");
@@ -217,7 +241,8 @@ export function ExportApp() {
   }, [context, kind]);
 
   const changeKind = (next: ExportKind) => {
-    if (context && selecting) postToOnshape(context, { messageName: "stopRequest" });
+    if (context && selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
+    selectionRequestActive.current = false;
     setKind(next);
     if (next === "lathe" && !latheMaterials.includes(material)) setMaterial("aluminum 7075");
     if (next === "dxf" && !dxfMaterialsByMachining[machining].includes(material)) {
@@ -230,6 +255,7 @@ export function ExportApp() {
   };
 
   const changeMachining = (next: DxfMachiningType) => {
+    machiningEdited.current = true;
     setMachining(next);
     if (!dxfMaterialsByMachining[next].includes(material)) setMaterial(dxfMaterialsByMachining[next][0]);
     setSubmission("idle");
@@ -237,7 +263,8 @@ export function ExportApp() {
   };
 
   const changeLatheStock = (next: LatheStockType) => {
-    if (context && selecting) postToOnshape(context, { messageName: "stopRequest" });
+    if (context && selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
+    selectionRequestActive.current = false;
     setLatheStockType(next);
     setSelections([]);
     setSelecting(false);
@@ -281,6 +308,32 @@ export function ExportApp() {
     }
   };
 
+  const dxfSuggestionSelection = kind === "dxf" ? selections[0] : undefined;
+  useEffect(() => {
+    if (!context || !sessionToken || (kind === "dxf" && !dxfSuggestionSelection)) return;
+    const requestNumber = ++suggestionRequest.current;
+    getExportSuggestions(sessionToken, {
+      context,
+      selection: dxfSuggestionSelection,
+    }).then((suggestions) => {
+      if (requestNumber !== suggestionRequest.current) return;
+      if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
+      const suggestedMaterial = suggestions.material;
+      if (kind !== "dxf" || !suggestedMaterial || dxfMaterialEdited.current) return;
+      if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
+        setMaterial(suggestedMaterial);
+        return;
+      }
+      const preferredMachining = preferredMachiningByMaterial[suggestedMaterial];
+      if (!machiningEdited.current && preferredMachining) {
+        setMachining(preferredMachining);
+        setMaterial(suggestedMaterial);
+      }
+    }).catch(() => {
+      // Suggestions are best-effort and should never block a manual export.
+    });
+  }, [context, dxfSuggestionSelection, kind, machining, sessionToken]);
+
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
       ? positive(latheDiameter)
@@ -319,7 +372,7 @@ export function ExportApp() {
         machiningType: kind === "step" ? "3d printed" : kind === "lathe" ? "lathe" : machining,
         material: kind === "step" ? "3D Print" : material,
         materialThicknessInches: kind === "dxf" ? materialThickness : undefined,
-        subsystem: kind !== "step" && subsystem.trim() ? subsystem.trim() : undefined,
+        subsystem: subsystem.trim() ? subsystem.trim() : undefined,
         context,
         selections,
         lathe: kind === "lathe" ? {
@@ -390,7 +443,9 @@ export function ExportApp() {
               <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
-              {kind !== "step" && <><label className="field"><span>Material</span><select value={material} onChange={(e) => setMaterial(e.target.value as Material)}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>{kind === "dxf" && <label className="field"><span>Material thickness <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}<label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => setSubsystem(e.target.value)} placeholder="e.g. Drivetrain" maxLength={80} /></label></>}
+              {kind !== "step" && <label className="field"><span>Material</span><select value={material} onChange={(e) => { if (kind === "dxf") dxfMaterialEdited.current = true; setMaterial(e.target.value as Material); }}>{(kind === "lathe" ? latheMaterials : dxfMaterialsByMachining[machining]).map((item) => <option value={item} key={item}>{item === "SRPP" ? item : item.replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}</select></label>}
+              {kind === "dxf" && <label className="field"><span>Material thickness <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={materialThickness ?? ""} onChange={(event) => setMaterialThickness(optionalNumber(event.target.value))} placeholder="e.g. 0.125" required /></label>}
+              <label className={`field ${kind === "dxf" ? "span-2" : ""}`}><span>Subsystem <em>optional</em></span><input value={subsystem} onChange={(e) => { subsystemEdited.current = true; setSubsystem(e.target.value); }} placeholder="Defaults to the Onshape document name" maxLength={80} /></label>
               {kind === "lathe" && <>
                 <label className="field span-2"><span>Stock profile</span><select value={latheStockType} onChange={(event) => changeLatheStock(event.target.value as LatheStockType)}>{latheStockTypes.map((stock) => <option value={stock} key={stock}>{stock.replace(/\b\w/g, (character) => character.toUpperCase())}</option>)}</select></label>
                 {latheStockType === "round shaft" && <label className="field span-2"><span>Shaft diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={latheDiameter ?? ""} onChange={(event) => setLatheDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label>}

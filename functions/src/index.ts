@@ -29,6 +29,7 @@ const ISOMETRIC_VIEW_MATRIX = "0.612,0.612,0,0,-0.354,0.354,0.707,0,0.707,-0.707
 
 type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
+type DxfMaterial = "wood" | "aluminum" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
 type LatheStockType = "1/2 true hex" | "1/2 rounded hex" | "3/8 true hex" | "3/8 rounded hex" | "round shaft" | "round tube";
 type LatheEndOperationType = "leave as modeled" | "turn down" | "tap" | "drill" | "other";
 
@@ -252,6 +253,37 @@ function readPositiveDimension(value: unknown, label: string): number {
   return dimension;
 }
 
+function parseOnshapeContext(value: unknown): ExportBody["context"] {
+  if (!value || typeof value !== "object") throw new HttpError(400, "The Onshape document context is required.");
+  const context = value as Partial<ExportBody["context"]>;
+  const workspaceOrVersion = context.workspaceOrVersion;
+  if (workspaceOrVersion !== "w" && workspaceOrVersion !== "v") throw new HttpError(400, "Invalid workspace or version type.");
+  return {
+    documentId: readId(context.documentId, "Document ID"),
+    workspaceOrVersion,
+    workspaceOrVersionId: readId(context.workspaceOrVersionId, "Workspace or version ID"),
+    elementId: readId(context.elementId, "Element ID"),
+    server: safeOnshapeOrigin(context.server),
+    configuration: readOptionalOnshapeParameter(context.configuration, "Configuration", 2000),
+    onshapeUserId: readOptionalString(context.onshapeUserId, "Onshape user ID", 128),
+  };
+}
+
+function parseOnshapeSelection(value: unknown, index = 0): ExportBody["selections"][number] {
+  if (!value || typeof value !== "object") throw new HttpError(400, `Selection ${index + 1} is invalid.`);
+  const rawSelection = value as Partial<ExportBody["selections"][number]>;
+  const rawSelectionType = String(rawSelection.entityType).toUpperCase();
+  const entityType: SelectionType | undefined = rawSelectionType === "FACE" ? "FACE"
+      : ["BODY", "PART", "SOLID"].includes(rawSelectionType) ? "BODY" : undefined;
+  if (!entityType) throw new HttpError(400, `Selection ${index + 1} has an invalid type.`);
+  return {
+    entityType,
+    selectionId: readId(rawSelection.selectionId, `Selection ${index + 1} ID`),
+    partId: rawSelection.partId ? readId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
+    name: readOptionalString(rawSelection.name, `Selection ${index + 1} name`, 120),
+  };
+}
+
 function parseLatheEnd(value: unknown, label: string): LatheEndOperation {
   if (!value || typeof value !== "object") throw new HttpError(400, `${label} instructions are required.`);
   const raw = value as Partial<LatheEndOperation>;
@@ -314,22 +346,10 @@ function parseExportBody(value: unknown): ExportBody {
   const body = value as Partial<ExportBody> & { selection?: ExportBody["selections"][number] };
   const kind = body.kind;
   if (kind !== "dxf" && kind !== "step" && kind !== "lathe") throw new HttpError(400, "Choose DXF, STEP, or lathe.");
-  if (!body.context) throw new HttpError(400, "The Onshape document context is required.");
+  const context = parseOnshapeContext(body.context);
   const lathe = kind === "lathe" ? parseLatheDetails(body.lathe) : undefined;
   const rawSelections = Array.isArray(body.selections) ? body.selections : body.selection ? [body.selection] : [];
-  const selections = rawSelections.map((rawSelection, index) => {
-    if (!rawSelection || typeof rawSelection !== "object") throw new HttpError(400, `Selection ${index + 1} is invalid.`);
-    const rawSelectionType = String(rawSelection.entityType).toUpperCase();
-    const entityType: SelectionType | undefined = rawSelectionType === "FACE" ? "FACE"
-        : ["BODY", "PART", "SOLID"].includes(rawSelectionType) ? "BODY" : undefined;
-    if (!entityType) throw new HttpError(400, `Selection ${index + 1} has an invalid type.`);
-    return {
-      entityType,
-      selectionId: readId(rawSelection.selectionId, `Selection ${index + 1} ID`),
-      partId: rawSelection.partId ? readId(rawSelection.partId, `Selection ${index + 1} part ID`) : undefined,
-      name: readOptionalString(rawSelection.name, `Selection ${index + 1} name`, 120),
-    };
-  });
+  const selections = rawSelections.map(parseOnshapeSelection);
   if (new Set(selections.map((selection) => selection.selectionId)).size !== selections.length) {
     throw new HttpError(400, "Select distinct geometry for each selection.");
   }
@@ -361,9 +381,6 @@ function parseExportBody(value: unknown): ExportBody {
   const materialThicknessInches = kind === "dxf"
     ? readPositiveDimension(body.materialThicknessInches, "Material thickness")
     : undefined;
-  const wv = body.context.workspaceOrVersion;
-  if (wv !== "w" && wv !== "v") throw new HttpError(400, "Invalid workspace or version type.");
-
   return {
     kind,
     friendlyName: readString(body.friendlyName, "Friendly name", 80),
@@ -371,16 +388,8 @@ function parseExportBody(value: unknown): ExportBody {
     machiningType: machining as ExportBody["machiningType"],
     material: kind === "step" ? "3D Print" : body.material,
     materialThicknessInches,
-    subsystem: kind === "dxf" || kind === "lathe" ? readOptionalString(body.subsystem, "Subsystem", 80) : undefined,
-    context: {
-      documentId: readId(body.context.documentId, "Document ID"),
-      workspaceOrVersion: wv,
-      workspaceOrVersionId: readId(body.context.workspaceOrVersionId, "Workspace or version ID"),
-      elementId: readId(body.context.elementId, "Element ID"),
-      server: safeOnshapeOrigin(body.context.server),
-      configuration: readOptionalOnshapeParameter(body.context.configuration, "Configuration", 2000),
-      onshapeUserId: readOptionalString(body.context.onshapeUserId, "Onshape user ID", 128),
-    },
+    subsystem: readOptionalString(body.subsystem, "Subsystem", 80),
+    context,
     selections,
     lathe,
   };
@@ -424,6 +433,30 @@ interface OnshapeBodyDetails {
   faces?: OnshapeFaceDetails[];
 }
 
+interface OnshapePartInfo {
+  id?: unknown;
+  partId?: unknown;
+  material?: {
+    displayName?: unknown;
+    id?: unknown;
+    libraryName?: unknown;
+  } | null;
+}
+
+function suggestedDxfMaterial(...values: unknown[]): DxfMaterial | undefined {
+  const description = values
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  if (/\b(carbon[\s_-]*fib(?:er|re)|cfrp)\b/.test(description)) return "carbon fiber";
+  if (/\b(polycarbonate|polycarb|lexan)\b/.test(description)) return "polycarb";
+  if (/\b(srpp|self[\s_-]*reinforced[\s_-]*polypropylene|polypropylene)\b/.test(description)) return "SRPP";
+  if (/\b(aluminum|aluminium)\b/.test(description)) return "aluminum";
+  if (/\bsteel\b/.test(description)) return "steel";
+  if (/\b(wood|plywood|mdf|timber)\b/.test(description)) return "wood";
+  return undefined;
+}
+
 function normalizedVector(value: OnshapeVector3 | undefined): [number, number, number] | undefined {
   const vector = [Number(value?.x), Number(value?.y), Number(value?.z)] as [number, number, number];
   if (!vector.every(Number.isFinite)) return undefined;
@@ -452,7 +485,7 @@ function faceViewMatrix(normal: [number, number, number]): string {
 }
 
 async function getPartStudioBodyDetails(
-  body: ExportBody,
+  body: Pick<ExportBody, "context">,
   session: StoredSession,
   sessionId: string,
   version: string,
@@ -475,6 +508,19 @@ async function getPartStudioBodyDetails(
   } | null;
   if (!Array.isArray(details?.bodies)) throw new HttpError(502, "Onshape returned invalid Part Studio body details.");
   return details.bodies;
+}
+
+function partIdForSelection(
+  bodies: OnshapeBodyDetails[],
+  selection: ExportBody["selections"][number],
+): string | undefined {
+  const selectedIds = new Set([selection.selectionId, selection.partId].filter((value): value is string => Boolean(value)));
+  const selectedBody = bodies.find((candidate) =>
+    (typeof candidate.id === "string" && selectedIds.has(candidate.id))
+    || candidate.faces?.some((face) => typeof face.id === "string" && selectedIds.has(face.id)),
+  );
+  if (typeof selectedBody?.id === "string" && selectedBody.id) return selectedBody.id;
+  return selection.entityType === "BODY" ? selection.partId ?? selection.selectionId : undefined;
 }
 
 async function selectedFaceView(
@@ -507,13 +553,8 @@ async function selectedPartId(
 ): Promise<string> {
   const bodies = bodyDetails ?? await getPartStudioBodyDetails(body, session, sessionId, version);
   const selection = body.selections[0];
-  const selectedIds = new Set([selection.selectionId, selection.partId].filter((value): value is string => Boolean(value)));
-  const selectedBody = bodies.find((candidate) =>
-    (typeof candidate.id === "string" && selectedIds.has(candidate.id))
-    || candidate.faces?.some((face) => typeof face.id === "string" && selectedIds.has(face.id)),
-  );
-  if (typeof selectedBody?.id === "string" && selectedBody.id) return selectedBody.id;
-  if (selection.entityType === "BODY") return selection.partId ?? selection.selectionId;
+  const partId = partIdForSelection(bodies, selection);
+  if (partId) return partId;
   throw new HttpError(422, "The selected face no longer belongs to a part in the current Part Studio configuration.");
 }
 
@@ -874,6 +915,63 @@ async function disconnectSession(req: Request, res: Response): Promise<void> {
   res.status(204).send();
 }
 
+async function handleExportSuggestions(req: Request, res: Response): Promise<void> {
+  const { id: sessionId, data: session } = await loadSession(req);
+  if (!req.body || typeof req.body !== "object") throw new HttpError(400, "A JSON request body is required.");
+  const raw = req.body as { context?: unknown; selection?: unknown };
+  const context = parseOnshapeContext(raw.context);
+  if (context.server !== session.server) {
+    throw new HttpError(400, "The selected document does not match the connected Onshape server.");
+  }
+  const selection = raw.selection === undefined ? undefined : parseOnshapeSelection(raw.selection);
+  const version = apiVersion.value().replace(/^\//, "");
+
+  const subsystemPromise = (async (): Promise<string | undefined> => {
+    const endpoint = `${session.server}/api/${version}/documents/${encodeURIComponent(context.documentId)}`;
+    const response = await authorizedOnshapeFetch(endpoint, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    }, session, sessionId);
+    if (!response.ok) throw new Error(`Onshape document lookup failed (${response.status}).`);
+    const document = await response.json().catch(() => null) as { name?: unknown } | null;
+    if (typeof document?.name !== "string") return undefined;
+    const name = document.name.trim().replace(/[\u0000-\u001f]/g, " ").trim();
+    return name ? name.slice(0, 80) : undefined;
+  })().catch((error: unknown) => {
+    console.warn("Could not suggest the Onshape document name.", error);
+    return undefined;
+  });
+
+  const materialPromise = selection ? (async (): Promise<DxfMaterial | undefined> => {
+    const bodies = await getPartStudioBodyDetails({ context }, session, sessionId, version);
+    const partId = partIdForSelection(bodies, selection);
+    if (!partId) return undefined;
+    const endpoint = new URL(
+      `${session.server}/api/${version}/parts/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
+    );
+    if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+    const response = await authorizedOnshapeFetch(endpoint.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    }, session, sessionId);
+    if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
+    const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
+    if (!Array.isArray(parts)) return undefined;
+    const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
+    return suggestedDxfMaterial(
+      part?.material?.displayName,
+      part?.material?.libraryName,
+      part?.material?.id,
+    );
+  })().catch((error: unknown) => {
+    console.warn("Could not suggest the selected Onshape part material.", error);
+    return undefined;
+  }) : Promise.resolve(undefined);
+
+  const [subsystem, material] = await Promise.all([subsystemPromise, materialPromise]);
+  res.json({ ...(subsystem ? { subsystem } : {}), ...(material ? { material } : {}) });
+}
+
 async function handleExport(req: Request, res: Response): Promise<void> {
   const { id: sessionId, data: session } = await loadSession(req);
   const body = parseExportBody(req.body);
@@ -994,6 +1092,7 @@ async function handler(req: Request, res: Response): Promise<void> {
     return;
   }
   if (req.method === "DELETE" && path === "/session") return disconnectSession(req, res);
+  if (req.method === "POST" && path === "/export-suggestions") return handleExportSuggestions(req, res);
   if (req.method === "POST" && path === "/exports") return handleExport(req, res);
   throw new HttpError(404, "Not found.");
 }

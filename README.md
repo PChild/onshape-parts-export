@@ -6,7 +6,8 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Select one solid part—or any face on that part—and export a STEP file for 3D printing.
 - Store STEP requests with the fixed material value `3d Print`.
 - Create a manual-lathe request without exporting a file by selecting its two planar end faces.
-- Require a friendly name and quantity; DXF requests also require material thickness in inches, while DXF and lathe requests require material and accept an optional subsystem.
+- Require a friendly name and quantity; DXF requests also require material thickness in inches, while DXF and lathe requests require material.
+- Prefill the editable subsystem field from the Onshape document name for every request, and loosely match a selected DXF part's Onshape material to a supported shop material when possible.
 - Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel and aluminum; waterjet supports every listed DXF material.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Record the authenticated Onshape user with every export or manual request.
@@ -141,6 +142,7 @@ OAuth opens inside the Onshape application pane. After connecting, the app store
 - STEP requests resolve a selected body or face to its owning Part Studio body, then use the Part Studio translation workflow with that deterministic part ID.
 - DXF and STEP requests ask Onshape for a 512×512 shaded PNG/JPEG/WebP preview of the selected part. DXF previews use the selected face orientation; STEP previews use an isometric orientation. Preview failure does not discard an otherwise valid manufacturing export.
 - Lathe requests verify that both selected end faces belong to one Part Studio body. The app uses the known dimensions of fixed hex stock and asks for round-stock dimensions instead of guessing them from model topology.
+- Suggested document names and materials are best-effort conveniences. Students can edit them, and a failed or unknown metadata lookup does not prevent an export.
 - Onshape may prepare exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
 - The function rejects exports above 250 MB and gives each file a collision-safe suffix.
 - If your enterprise uses a custom Onshape domain, the extension-provided `server` is preserved through OAuth and API calls. Only HTTPS `*.onshape.com` origins are accepted.

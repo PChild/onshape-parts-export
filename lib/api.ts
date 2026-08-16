@@ -1,4 +1,4 @@
-import type { ExportRequest, ExportResult, SessionUser } from "./types";
+import type { ExportRequest, ExportResult, ExportSuggestionsRequest, ExportSuggestionsResult, SessionUser } from "./types";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
 
@@ -31,4 +31,8 @@ export function disconnectSession(sessionToken: string): Promise<void> {
 
 export function createExport(sessionToken: string, request: ExportRequest): Promise<ExportResult> {
   return apiFetch("/exports", sessionToken, { method: "POST", body: JSON.stringify(request) });
+}
+
+export function getExportSuggestions(sessionToken: string, request: ExportSuggestionsRequest): Promise<ExportSuggestionsResult> {
+  return apiFetch("/export-suggestions", sessionToken, { method: "POST", body: JSON.stringify(request) });
 }

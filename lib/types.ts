@@ -72,3 +72,13 @@ export interface ExportResult {
   fileName?: string;
   previewStoragePath?: string;
 }
+
+export interface ExportSuggestionsRequest {
+  context: OnshapeContext;
+  selection?: OnshapeSelection;
+}
+
+export interface ExportSuggestionsResult {
+  subsystem?: string;
+  material?: Material;
+}

@@ -58,7 +58,7 @@ type SelectionEntityType = OnshapeSelection["entityType"];
 
 export function selectionsFromMessage(data: unknown, allowedTypes: readonly SelectionEntityType[]): OnshapeSelection[] {
   const root = asRecord(data);
-  if (!root || root.messageName !== "SELECTION") return [];
+  if (!root || (root.messageName !== "SELECTION" && root.messageName !== "REQUESTED_SELECTION")) return [];
 
   const candidates: UnknownRecord[] = [];
   const selections = root.selections;
@@ -97,7 +97,7 @@ export function selectionsFromMessage(data: unknown, allowedTypes: readonly Sele
     parsed.push({
       entityType,
       selectionId,
-      partId: firstString(candidate, ["partId", "idTag"]),
+      partId: firstString(candidate, ["partId", "bodyId", "idTag"]),
       name: firstString(candidate, ["name", "partName"]),
     });
   }
