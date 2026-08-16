@@ -523,27 +523,55 @@ interface ExportPreview {
   extension: "png" | "jpg" | "webp";
 }
 
+function recognizedPreview(bytes: Buffer): ExportPreview | undefined {
+  if (!bytes.length || bytes.length > MAX_PREVIEW_BYTES) return undefined;
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { bytes, contentType: "image/png", extension: "png" };
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { bytes, contentType: "image/jpeg", extension: "jpg" };
+  }
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return { bytes, contentType: "image/webp", extension: "webp" };
+  }
+  return undefined;
+}
+
+function shadedViewCandidates(value: unknown, candidates: Array<string | Buffer>, depth = 0): void {
+  if (depth > 4) return;
+  if (typeof value === "string") {
+    if (value) candidates.push(value);
+    return;
+  }
+  if (!Array.isArray(value) || !value.length) return;
+  if (value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+    candidates.push(Buffer.from(value as number[]));
+    return;
+  }
+  const stringChunks = value.filter((item): item is string => typeof item === "string" && Boolean(item));
+  if (stringChunks.length > 1) candidates.push(stringChunks.join(""));
+  value.forEach((item) => shadedViewCandidates(item, candidates, depth + 1));
+}
+
 function decodeShadedView(payload: unknown): ExportPreview | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const images = (payload as { images?: unknown }).images;
   if (!Array.isArray(images)) return undefined;
-  const groups = images.filter((group): group is unknown[] => Array.isArray(group));
-  const individualCandidates = groups.flatMap((group) => group);
-  const joinedCandidates = groups.map((group) => group.filter((item): item is string => typeof item === "string").join(""));
-  const candidates = [...individualCandidates, ...joinedCandidates];
+  const candidates: Array<string | Buffer> = [];
+  shadedViewCandidates(images, candidates);
   for (const candidate of candidates) {
-    if (typeof candidate !== "string" || !candidate) continue;
-    const encoded = candidate.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").replace(/\s+/g, "");
-    const bytes = Buffer.from(encoded, "base64");
-    if (!bytes.length || bytes.length > MAX_PREVIEW_BYTES) continue;
-    if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-      return { bytes, contentType: "image/png", extension: "png" };
-    }
-    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-      return { bytes, contentType: "image/jpeg", extension: "jpg" };
-    }
-    if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
-      return { bytes, contentType: "image/webp", extension: "webp" };
+    const bytes = Buffer.isBuffer(candidate)
+      ? candidate
+      : Buffer.from(candidate.replace(/^data:image\/[a-z0-9.+-]+(?:;[^,]*)?;base64,/i, "").replace(/\s+/g, ""), "base64");
+    const recognized = recognizedPreview(bytes);
+    if (recognized) return recognized;
+
+    // Some older Onshape API versions wrap an already-base64 image in a
+    // byte array, resulting in one additional encoding layer.
+    const nestedBase64 = bytes.toString("ascii").replace(/\s+/g, "");
+    if (nestedBase64.length && nestedBase64.length <= Math.ceil(MAX_PREVIEW_BYTES * 4 / 3) + 16 && /^[A-Za-z0-9+/_=-]+$/.test(nestedBase64)) {
+      const nestedRecognized = recognizedPreview(Buffer.from(nestedBase64, "base64"));
+      if (nestedRecognized) return nestedRecognized;
     }
   }
   return undefined;
