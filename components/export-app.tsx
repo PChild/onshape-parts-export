@@ -81,6 +81,15 @@ function defaultEndOperation(operation: LatheEndOperation["operation"]): LatheEn
     : { operation };
 }
 
+function selectionTypesForKind(kind: ExportKind): readonly OnshapeSelection["entityType"][] {
+  return kind === "step" ? ["BODY", "FACE"] : ["FACE"];
+}
+
+function compatibleSelectionsForKind(kind: ExportKind, selections: OnshapeSelection[]): OnshapeSelection[] {
+  const compatible = selections.filter((selection) => selectionTypesForKind(kind).includes(selection.entityType));
+  return compatible.slice(0, kind === "lathe" ? 2 : 1);
+}
+
 function positive(value: number | undefined): boolean {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -211,59 +220,67 @@ export function ExportApp() {
 
   useEffect(() => {
     if (!context) return;
-    postToOnshape(context, { messageName: "applicationInit" });
     const handler = (event: MessageEvent) => {
       if (event.origin !== context.server) return;
-      if (!selectionRequestActive.current) return;
       const parsed = selectionsFromMessage(event.data, allowedSelectionTypes.current);
       if (parsed.length) {
         setSelections((current) => {
           const count = expectedSelectionCount.current;
-          const candidates = count > 1 ? [...current, ...parsed] : parsed;
+          const requested = selectionRequestActive.current;
+          const candidates = requested && count > 1 ? [...current, ...parsed] : parsed;
           const accepted = candidates.filter((selection, index, all) =>
             all.findIndex((candidate) => candidate.entityType === selection.entityType && candidate.selectionId === selection.selectionId) === index,
           ).slice(0, count);
-          const pending = accepted.length < count;
-          selectionRequestActive.current = pending;
-          setSelecting(pending);
+          if (requested) {
+            const pending = accepted.length < count;
+            selectionRequestActive.current = pending;
+            setSelecting(pending);
+          } else {
+            setSelecting(false);
+          }
           return accepted;
         });
       }
     };
     window.addEventListener("message", handler);
+    postToOnshape(context, { messageName: "applicationInit" });
     return () => window.removeEventListener("message", handler);
   }, [context]);
 
-  const selectTarget = useCallback(() => {
+  const selectTarget = useCallback((replaceExisting = false) => {
     if (!context) return;
     if (selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
-    const entityTypes: readonly OnshapeSelection["entityType"][] = kind === "dxf"
-      ? ["FACE"]
-      : kind === "step" ? ["BODY", "FACE"] : ["FACE"];
+    const entityTypes = selectionTypesForKind(kind);
+    const preserved = !replaceExisting && kind === "lathe" && selections.length === 1 && selections[0].entityType === "FACE"
+      ? selections
+      : [];
     const selectionCount = kind === "lathe" ? 2 : 1;
+    const requestedSelectionCount = selectionCount - preserved.length;
     allowedSelectionTypes.current = entityTypes;
     expectedSelectionCount.current = selectionCount;
     selectionRequestActive.current = true;
-    setSelections([]);
+    setSelections(preserved);
     setSelecting(true);
     setMessage("");
     postToOnshape(context, {
       messageName: "requestSelection",
       messageId: crypto.randomUUID(),
       entityTypeSpecifier: entityTypes,
-      requiredSelectionCount: selectionCount,
+      requiredSelectionCount: requestedSelectionCount,
     });
-  }, [context, kind]);
+  }, [context, kind, selections]);
 
   const changeKind = (next: ExportKind) => {
     if (context && selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
     selectionRequestActive.current = false;
+    allowedSelectionTypes.current = selectionTypesForKind(next);
+    expectedSelectionCount.current = next === "lathe" ? 2 : 1;
     setKind(next);
     if (next === "lathe" && !latheMaterials.includes(material)) setMaterial("aluminum 7075");
     if (next === "dxf" && !dxfMaterialsByMachining[machining].includes(material)) {
       setMaterial(dxfMaterialsByMachining[machining][0]);
     }
-    setSelections([]);
+    setSelections((current) => compatibleSelectionsForKind(next, current));
     setSelecting(false);
     setSubmission("idle");
     setMessage("");
@@ -278,11 +295,7 @@ export function ExportApp() {
   };
 
   const changeLatheStock = (next: LatheStockType) => {
-    if (context && selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
-    selectionRequestActive.current = false;
     setLatheStockType(next);
-    setSelections([]);
-    setSelecting(false);
     setSubmission("idle");
     setMessage("");
   };
@@ -448,10 +461,10 @@ export function ExportApp() {
               <h2>Select {kind === "dxf" ? "a planar face" : kind === "step" ? "a part or any face on it" : "the two end faces"}</h2>
               <p>{kind === "dxf" ? "Choose the face that should lie flat on the machine bed." : kind === "step" ? "Choose one solid body, or click any face belonging to that body." : "Choose both planar end faces of the same shaft or tube. The first face becomes End A and the second becomes End B."}</p>
             </div>
-            <button className={`select-button ${selections.length === requiredSelectionCount ? "selected" : ""}`} type="button" onClick={selectTarget} disabled={!context}>
-              {selections.length === requiredSelectionCount ? <><CheckIcon /> Selected</> : selecting ? `${selections.length} of ${requiredSelectionCount} selected…` : `Select ${kind === "dxf" ? "face" : kind === "step" ? "part or face" : "two faces"}`}
+            <button className={`select-button ${selections.length === requiredSelectionCount ? "selected" : ""}`} type="button" onClick={() => selectTarget()} disabled={!context}>
+              {selections.length === requiredSelectionCount ? <><CheckIcon /> Selected</> : selecting ? `${selections.length} of ${requiredSelectionCount} selected…` : `Select ${kind === "dxf" ? "face" : kind === "step" ? "part or face" : selections.length === 1 ? "End B" : "two faces"}`}
             </button>
-            {selections.map((selection, index) => <div className="selection-detail" key={`${selection.entityType}:${selection.selectionId}`}><span>{kind === "lathe" && selections.length > 1 ? `End ${index === 0 ? "A" : "B"}` : selection.entityType === "BODY" ? "Part" : "Face"}</span><code>{selection.name ?? selection.selectionId}</code>{index === 0 && <button type="button" onClick={selectTarget}>Change</button>}</div>)}
+            {selections.map((selection, index) => <div className="selection-detail" key={`${selection.entityType}:${selection.selectionId}`}><span>{kind === "lathe" ? `End ${index === 0 ? "A" : "B"}` : selection.entityType === "BODY" ? "Part" : "Face"}</span><code>{selection.name ?? selection.selectionId}</code>{index === 0 && <button type="button" onClick={() => selectTarget(true)}>Change</button>}</div>)}
           </section>
 
           <section className="card details-card">

@@ -14,6 +14,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Match explicit Onshape aluminum grades when available and default an unspecified aluminum material to the commonly used Aluminum 6061.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Keep the two lathe end-operation sections collapsible for smaller classroom screens.
+- Adopt face selections made while the panel is open, preserve compatible selections when switching processes, and reuse one selected face as Lathe End A.
 - Record the authenticated Onshape user with every export or manual request.
 - Store generated files in Cloud Storage and every manufacturing record in Firestore.
 - Follow the browser color scheme on first use, with a remembered light/dark override.
@@ -119,7 +120,9 @@ To keep the exporter visible before students select anything in an assembly, add
 https://GITHUB_USER.github.io/REPOSITORY/?contextType=assembly&documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}
 ```
 
-Open that panel first, then use its normal **Select face**, **Select part or face**, or **Select two faces** button. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
+Open that panel first, then click geometry directly or use its normal selection button. A selected face can be reused for DXF or STEP, and it becomes End A when switching to Lathe so only End B remains to be selected. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
+
+Onshape currently does not provide a right-panel message for retrieving geometry that was selected before the panel was first initialized. Keep the panel open before selecting a face; the app then receives normal `SELECTION` messages automatically.
 
 Standard Content instances are not currently supported because they do not have an ordinary source Part Studio export context.
 
