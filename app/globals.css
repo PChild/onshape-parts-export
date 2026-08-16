@@ -101,9 +101,15 @@ input::placeholder { color: var(--faint); }
 .fixed-value svg { width: 15px; height: 15px; color: var(--accent); }
 
 .lathe-ends { display: grid; gap: 12px; padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--line); }
-.end-operation { min-width: 0; margin: 0; padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
-.end-operation legend { padding: 0 6px; color: var(--text); font-size: 11px; font-weight: 750; }
-.end-operation legend small { margin-left: 7px; color: var(--faint); font-size: 9px; font-weight: 500; }
+.end-operation { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); overflow: hidden; }
+.end-operation summary { min-height: 44px; padding: 10px 12px; display: flex; align-items: center; cursor: pointer; list-style: none; }
+.end-operation summary::-webkit-details-marker { display: none; }
+.end-operation summary::after { content: "›"; margin-left: auto; color: var(--faint); font-size: 20px; line-height: 1; transform: rotate(90deg); transition: transform .15s ease; }
+.end-operation:not([open]) summary::after { transform: rotate(0deg); }
+.end-operation summary > span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.end-operation summary strong { color: var(--text); font-size: 11px; }
+.end-operation summary small { color: var(--faint); font-size: 9px; font-weight: 500; }
+.end-operation-fields { padding: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; border-top: 1px solid var(--line); }
 
 .identity-row { min-height: 54px; padding: 7px 10px; display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
 .avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; color: var(--accent-strong); background: var(--accent-soft); font-weight: 750; }
@@ -134,5 +140,5 @@ input::placeholder { color: var(--faint); }
   .field.span-2 { grid-column: span 1; }
   .segmented button { gap: 6px; }
   .segmented button svg { width: 17px; height: 17px; }
-  .end-operation { grid-template-columns: 1fr; }
+  .end-operation-fields { grid-template-columns: 1fr; }
 }

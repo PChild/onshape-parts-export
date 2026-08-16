@@ -28,7 +28,8 @@ export function readOnshapeContext(url: URL): OnshapeContext | null {
     (workspaceOrVersion === "v" ? resolvedParameter(p.get("versionId")) : resolvedParameter(p.get("workspaceId"))) ??
     pathMatch?.[3] ??
     "";
-  const elementId = resolvedParameter(p.get("elementId")) ?? resolvedParameter(p.get("tabElementId")) ?? pathMatch?.[4] ?? "";
+  const tabElementId = resolvedParameter(p.get("tabElementId"));
+  const elementId = resolvedParameter(p.get("elementId")) ?? tabElementId ?? pathMatch?.[4] ?? "";
 
   if (!documentId || !workspaceOrVersionId || !elementId) return null;
 
@@ -37,6 +38,7 @@ export function readOnshapeContext(url: URL): OnshapeContext | null {
     workspaceOrVersion,
     workspaceOrVersionId,
     elementId,
+    tabElementId,
     server: normalizeOrigin(p.get("server")),
     configuration: resolvedParameter(p.get("configuration")),
     onshapeUserId: resolvedParameter(p.get("userId")),
@@ -113,7 +115,7 @@ export function postToOnshape(context: OnshapeContext, message: UnknownRecord): 
     {
       documentId: context.documentId,
       workspaceId: context.workspaceOrVersionId,
-      elementId: context.elementId,
+      elementId: context.tabElementId ?? context.elementId,
       ...message,
     },
     context.server,

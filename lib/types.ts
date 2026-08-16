@@ -1,6 +1,6 @@
 export type ExportKind = "dxf" | "step" | "lathe";
 export type MachiningType = "laser" | "plasma" | "waterjet" | "3d printed" | "lathe";
-export type Material = "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
+export type Material = "wood" | "aluminum 6061" | "aluminum 7075" | "aluminum 5052" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
 export type LatheStockType =
   | "1/2 true hex"
   | "1/2 rounded hex"
@@ -34,6 +34,7 @@ export interface OnshapeContext {
   workspaceOrVersion: "w" | "v";
   workspaceOrVersionId: string;
   elementId: string;
+  tabElementId?: string;
   server: string;
   configuration?: string;
   onshapeUserId?: string;
@@ -81,4 +82,5 @@ export interface ExportSuggestionsRequest {
 export interface ExportSuggestionsResult {
   subsystem?: string;
   material?: Material;
+  friendlyName?: string;
 }

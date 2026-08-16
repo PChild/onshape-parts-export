@@ -25,11 +25,12 @@ const MAX_PREVIEW_BYTES = 5 * 1024 * 1024;
 const EXPORT_RESULT_TIMEOUT_MS = 2 * 60 * 1000;
 const EXPORT_RESULT_POLL_MS = 1_000;
 const PREVIEW_SIZE = 512;
+const METERS_TO_INCHES = 39.37007874015748;
 const ISOMETRIC_VIEW_MATRIX = "0.612,0.612,0,0,-0.354,0.354,0.707,0,0.707,-0.707,0.707,0";
 
 type ExportKind = "dxf" | "step" | "lathe";
 type SelectionType = "FACE" | "BODY";
-type DxfMaterial = "wood" | "aluminum" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
+type DxfMaterial = "wood" | "aluminum 6061" | "aluminum 7075" | "aluminum 5052" | "steel" | "SRPP" | "polycarb" | "carbon fiber";
 type LatheStockType = "1/2 true hex" | "1/2 rounded hex" | "3/8 true hex" | "3/8 rounded hex" | "round shaft" | "round tube";
 type LatheEndOperationType = "leave as modeled" | "turn down" | "tap" | "drill" | "other";
 
@@ -63,7 +64,7 @@ interface ExportBody {
   friendlyName: string;
   quantity: number;
   machiningType: "laser" | "plasma" | "waterjet" | "3D printed" | "lathe";
-  material?: "wood" | "aluminum" | "aluminum 7075" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
+  material?: "wood" | "aluminum 6061" | "aluminum 7075" | "aluminum 5052" | "steel" | "SRPP" | "polycarb" | "carbon fiber" | "3D Print";
   materialThicknessInches?: number;
   subsystem?: string;
   context: {
@@ -71,6 +72,7 @@ interface ExportBody {
     workspaceOrVersion: "w" | "v";
     workspaceOrVersionId: string;
     elementId: string;
+    tabElementId?: string;
     server: string;
     configuration?: string;
     onshapeUserId?: string;
@@ -263,6 +265,7 @@ function parseOnshapeContext(value: unknown): ExportBody["context"] {
     workspaceOrVersion,
     workspaceOrVersionId: readId(context.workspaceOrVersionId, "Workspace or version ID"),
     elementId: readId(context.elementId, "Element ID"),
+    tabElementId: context.tabElementId ? readId(context.tabElementId, "Current tab element ID") : undefined,
     server: safeOnshapeOrigin(context.server),
     configuration: readOptionalOnshapeParameter(context.configuration, "Configuration", 2000),
     onshapeUserId: readOptionalString(context.onshapeUserId, "Onshape user ID", 128),
@@ -370,8 +373,8 @@ function parseExportBody(value: unknown): ExportBody {
   }
   const validDxfMaterialsByMachining: Record<"laser" | "plasma" | "waterjet", string[]> = {
     laser: ["SRPP", "polycarb", "wood"],
-    plasma: ["steel", "aluminum"],
-    waterjet: ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"],
+    plasma: ["steel", "aluminum 6061", "aluminum 7075", "aluminum 5052"],
+    waterjet: ["wood", "aluminum 6061", "aluminum 7075", "aluminum 5052", "steel", "SRPP", "polycarb", "carbon fiber"],
   };
   const validLatheMaterials = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
   if (kind === "dxf" && !validDxfMaterialsByMachining[machining as "laser" | "plasma" | "waterjet"].includes(String(body.material))) {
@@ -422,6 +425,7 @@ interface OnshapeFaceDetails {
   id?: unknown;
   surface?: {
     type?: unknown;
+    origin?: OnshapeVector3;
     direction?: OnshapeVector3;
     directionOrientedWithFace?: OnshapeVector3;
     normal?: OnshapeVector3;
@@ -436,6 +440,7 @@ interface OnshapeBodyDetails {
 interface OnshapePartInfo {
   id?: unknown;
   partId?: unknown;
+  name?: unknown;
   material?: {
     displayName?: unknown;
     id?: unknown;
@@ -451,18 +456,36 @@ function suggestedDxfMaterial(...values: unknown[]): DxfMaterial | undefined {
   if (/\b(carbon[\s_-]*fib(?:er|re)|cfrp)\b/.test(description)) return "carbon fiber";
   if (/\b(polycarbonate|polycarb|lexan)\b/.test(description)) return "polycarb";
   if (/\b(srpp|self[\s_-]*reinforced[\s_-]*polypropylene|polypropylene)\b/.test(description)) return "SRPP";
-  if (/\b(aluminum|aluminium)\b/.test(description)) return "aluminum";
+  if (/\b7075(?:-t\d+)?\b/.test(description)) return "aluminum 7075";
+  if (/\b5052(?:-h\d+)?\b/.test(description)) return "aluminum 5052";
+  if (/\b6061(?:-t\d+)?\b/.test(description)) return "aluminum 6061";
+  if (/\b(aluminum|aluminium)\b/.test(description)) return "aluminum 6061";
   if (/\bsteel\b/.test(description)) return "steel";
   if (/\b(wood|plywood|mdf|timber)\b/.test(description)) return "wood";
   return undefined;
 }
 
+function cleanSuggestion(value: unknown, maxLength = 80): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.trim().replace(/[\u0000-\u001f]/g, " ").trim();
+  return clean ? clean.slice(0, maxLength) : undefined;
+}
+
 function normalizedVector(value: OnshapeVector3 | undefined): [number, number, number] | undefined {
-  const vector = [Number(value?.x), Number(value?.y), Number(value?.z)] as [number, number, number];
-  if (!vector.every(Number.isFinite)) return undefined;
+  const vector = finiteVector(value);
+  if (!vector) return undefined;
   const length = Math.hypot(...vector);
   if (length < 1e-12) return undefined;
   return vector.map((component) => component / length) as [number, number, number];
+}
+
+function finiteVector(value: OnshapeVector3 | undefined): [number, number, number] | undefined {
+  const vector = [Number(value?.x), Number(value?.y), Number(value?.z)] as [number, number, number];
+  return vector.every(Number.isFinite) ? vector : undefined;
+}
+
+function dot(a: [number, number, number], b: [number, number, number]): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
@@ -651,18 +674,13 @@ async function getPartPreview(
   return preview;
 }
 
-async function selectedLathePartId(
+async function selectedLathePartDetails(
   body: ExportBody,
   session: StoredSession,
   sessionId: string,
   version: string,
-): Promise<string> {
+): Promise<{ partId: string; overallLengthInches: number }> {
   const bodies = await getPartStudioBodyDetails(body, session, sessionId, version);
-  for (const selection of body.selections) {
-    if (selection.entityType !== "FACE") continue;
-    const face = bodies.flatMap((candidate) => candidate.faces ?? []).find((candidate) => candidate.id === selection.selectionId);
-    if (face?.surface?.type !== "PLANE") throw new HttpError(422, "Select planar end faces for round lathe stock.");
-  }
   const owners = body.selections.map((selection) => bodies.find((candidate) =>
     (typeof candidate.id === "string" && candidate.id === selection.partId)
     || candidate.faces?.some((face) => face.id === selection.selectionId),
@@ -672,7 +690,30 @@ async function selectedLathePartId(
   }
   const partIds = new Set(owners.map((owner) => owner!.id as string));
   if (partIds.size !== 1) throw new HttpError(422, "All selected lathe geometry must belong to the same part.");
-  return [...partIds][0];
+  const faces = body.selections.map((selection) => owners[0]!.faces?.find((face) => face.id === selection.selectionId));
+  if (faces.some((face) => face?.surface?.type !== "PLANE")) {
+    throw new HttpError(422, "Select two planar end faces for the lathe part.");
+  }
+  const origins = faces.map((face) => finiteVector(face?.surface?.origin));
+  const normals = faces.map((face) => normalizedVector(
+    face?.surface?.directionOrientedWithFace ?? face?.surface?.normal ?? face?.surface?.direction,
+  ));
+  if (!origins[0] || !origins[1] || !normals[0] || !normals[1]) {
+    throw new HttpError(422, "Onshape did not return valid planes for the selected lathe end faces.");
+  }
+  if (Math.abs(dot(normals[0], normals[1])) < 0.999) {
+    throw new HttpError(422, "The selected lathe end faces must be parallel.");
+  }
+  const separationMeters = Math.abs(dot([
+    origins[1][0] - origins[0][0],
+    origins[1][1] - origins[0][1],
+    origins[1][2] - origins[0][2],
+  ], normals[0]));
+  const overallLengthInches = Math.round(separationMeters * METERS_TO_INCHES * 1_000_000) / 1_000_000;
+  if (!Number.isFinite(overallLengthInches) || overallLengthInches <= 0) {
+    throw new HttpError(422, "The selected lathe end faces do not define a positive overall length.");
+  }
+  return { partId: [...partIds][0], overallLengthInches };
 }
 
 async function callOnshapeExport(
@@ -934,18 +975,16 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     }, session, sessionId);
     if (!response.ok) throw new Error(`Onshape document lookup failed (${response.status}).`);
     const document = await response.json().catch(() => null) as { name?: unknown } | null;
-    if (typeof document?.name !== "string") return undefined;
-    const name = document.name.trim().replace(/[\u0000-\u001f]/g, " ").trim();
-    return name ? name.slice(0, 80) : undefined;
+    return cleanSuggestion(document?.name);
   })().catch((error: unknown) => {
     console.warn("Could not suggest the Onshape document name.", error);
     return undefined;
   });
 
-  const materialPromise = selection ? (async (): Promise<DxfMaterial | undefined> => {
+  const partSuggestionsPromise = selection ? (async (): Promise<{ material?: DxfMaterial; friendlyName?: string }> => {
     const bodies = await getPartStudioBodyDetails({ context }, session, sessionId, version);
     const partId = partIdForSelection(bodies, selection);
-    if (!partId) return undefined;
+    if (!partId) return {};
     const endpoint = new URL(
       `${session.server}/api/${version}/parts/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
     );
@@ -956,20 +995,18 @@ async function handleExportSuggestions(req: Request, res: Response): Promise<voi
     }, session, sessionId);
     if (!response.ok) throw new Error(`Onshape part metadata lookup failed (${response.status}).`);
     const parts = await response.json().catch(() => null) as OnshapePartInfo[] | null;
-    if (!Array.isArray(parts)) return undefined;
+    if (!Array.isArray(parts)) return {};
     const part = parts.find((candidate) => candidate.id === partId || candidate.partId === partId);
-    return suggestedDxfMaterial(
-      part?.material?.displayName,
-      part?.material?.libraryName,
-      part?.material?.id,
-    );
+    const material = suggestedDxfMaterial(part?.material?.displayName, part?.material?.libraryName, part?.material?.id);
+    const friendlyName = cleanSuggestion(part?.name);
+    return { ...(material ? { material } : {}), ...(friendlyName ? { friendlyName } : {}) };
   })().catch((error: unknown) => {
-    console.warn("Could not suggest the selected Onshape part material.", error);
-    return undefined;
-  }) : Promise.resolve(undefined);
+    console.warn("Could not suggest the selected Onshape part details.", error);
+    return {};
+  }) : Promise.resolve({});
 
-  const [subsystem, material] = await Promise.all([subsystemPromise, materialPromise]);
-  res.json({ ...(subsystem ? { subsystem } : {}), ...(material ? { material } : {}) });
+  const [subsystem, partSuggestions] = await Promise.all([subsystemPromise, partSuggestionsPromise]);
+  res.json({ ...(subsystem ? { subsystem } : {}), ...partSuggestions });
 }
 
 async function handleExport(req: Request, res: Response): Promise<void> {
@@ -979,17 +1016,51 @@ async function handleExport(req: Request, res: Response): Promise<void> {
   if (body.kind === "lathe") {
     if (body.context.server !== session.server) throw new HttpError(400, "The selected document does not match the connected Onshape server.");
     const version = apiVersion.value().replace(/^\//, "");
-    const partId = await selectedLathePartId(body, session, sessionId, version);
+    const { partId, overallLengthInches } = await selectedLathePartDetails(body, session, sessionId, version);
+    const preview = await getPartPreview(body, session, sessionId, version, partId, ISOMETRIC_VIEW_MATRIX).catch((error: unknown) => {
+      console.error("Could not create Onshape lathe preview.", error);
+      return undefined;
+    });
+    const dateFolder = new Date().toISOString().slice(0, 10);
+    const previewFileName = preview ? `${safeFileStem(body.friendlyName)}-${exportId.slice(0, 8)}-preview.${preview.extension}` : undefined;
+    const previewStoragePath = previewFileName ? `manufacturing/previews/${dateFolder}/${previewFileName}` : undefined;
+    if (preview && previewStoragePath) {
+      await getStorage().bucket(storageBucket.value() || undefined).file(previewStoragePath).save(preview.bytes, {
+        resumable: false,
+        contentType: preview.contentType,
+        metadata: {
+          cacheControl: "private, max-age=0",
+          metadata: {
+            exportId,
+            friendlyName: body.friendlyName,
+            kind: body.kind,
+            partId,
+            overallLengthInches: String(overallLengthInches),
+            source: "onshape-shaded-view",
+          },
+        },
+      });
+    }
     const requestMetadata = withoutUndefined(body) as Record<string, unknown>;
     await db.collection("exports").doc(exportId).set({
       ...requestMetadata,
       partId,
+      overallLengthInches,
+      previewStatus: preview ? "complete" : "unavailable",
+      ...(preview && previewFileName && previewStoragePath ? {
+        previewFileName,
+        previewStoragePath,
+        previewByteLength: preview.bytes.length,
+        previewContentType: preview.contentType,
+        previewWidth: PREVIEW_SIZE,
+        previewHeight: PREVIEW_SIZE,
+      } : {}),
       requestedBy: session.user,
       sessionId,
       status: "queued",
       createdAt: FieldValue.serverTimestamp(),
     });
-    res.status(201).json({ exportId, kind: body.kind });
+    res.status(201).json({ exportId, kind: body.kind, previewStoragePath });
     return;
   }
   const version = apiVersion.value().replace(/^\//, "");

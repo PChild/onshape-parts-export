@@ -17,15 +17,17 @@ type DxfMachiningType = "laser" | "plasma" | "waterjet";
 
 const dxfMaterialsByMachining: Record<DxfMachiningType, Material[]> = {
   laser: ["SRPP", "polycarb", "wood"],
-  plasma: ["steel", "aluminum"],
-  waterjet: ["wood", "aluminum", "steel", "SRPP", "polycarb", "carbon fiber"],
+  plasma: ["steel", "aluminum 6061", "aluminum 7075", "aluminum 5052"],
+  waterjet: ["wood", "aluminum 6061", "aluminum 7075", "aluminum 5052", "steel", "SRPP", "polycarb", "carbon fiber"],
 };
 const latheMaterials: Material[] = ["aluminum 7075", "polycarb", "steel", "carbon fiber"];
 const preferredMachiningByMaterial: Partial<Record<Material, DxfMachiningType>> = {
   wood: "laser",
   polycarb: "laser",
   SRPP: "laser",
-  aluminum: "plasma",
+  "aluminum 6061": "plasma",
+  "aluminum 7075": "plasma",
+  "aluminum 5052": "plasma",
   steel: "plasma",
   "carbon fiber": "waterjet",
 };
@@ -94,22 +96,28 @@ function EndOperationFields({
   subtitle,
   value,
   onChange,
+  defaultOpen = false,
 }: {
   title: string;
   subtitle: string;
   value: LatheEndOperation;
   onChange: (next: LatheEndOperation) => void;
+  defaultOpen?: boolean;
 }) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
   const update = (changes: Partial<LatheEndOperation>) => onChange({ ...value, ...changes });
+  const operationLabel = value.operation.replace(/\b\w/g, (character) => character.toUpperCase());
   return (
-    <fieldset className="end-operation">
-      <legend>{title}<small>{subtitle}</small></legend>
-      <label className="field span-2"><span>Operation</span><select value={value.operation} onChange={(event) => onChange({ operation: event.target.value as LatheEndOperation["operation"] })}><option value="leave as modeled">Leave as modeled</option><option value="turn down">Turn down for bearing</option><option value="tap">Tap</option><option value="drill">Drill</option><option value="other">Other</option></select></label>
-      {value.operation === "turn down" && <><label className="field"><span>Target diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.375" required /></label><label className="field"><span>Turned length <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.lengthInches ?? ""} onChange={(event) => update({ lengthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.5" required /></label></>}
-      {value.operation === "tap" && <><label className="field"><span>Thread</span><input value={value.thread ?? ""} onChange={(event) => update({ thread: event.target.value })} placeholder="e.g. 1/4-20" maxLength={40} required /></label><label className="field"><span>Thread depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.75" required /></label></>}
-      {value.operation === "drill" && <><label className="field"><span>Hole diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.25" required /></label><label className="field"><span>Hole depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 1.0" required /></label></>}
-      {value.operation === "other" && <label className="field span-2"><span>Instructions</span><textarea value={value.notes ?? ""} onChange={(event) => update({ notes: event.target.value })} placeholder="Describe the operation and dimensions" maxLength={300} required /></label>}
-    </fieldset>
+    <details className="end-operation" open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
+      <summary><span><strong>{title}</strong><small>{subtitle} · {operationLabel}</small></span></summary>
+      <div className="end-operation-fields">
+        <label className="field span-2"><span>Operation</span><select value={value.operation} onChange={(event) => onChange({ operation: event.target.value as LatheEndOperation["operation"] })}><option value="leave as modeled">Leave as modeled</option><option value="turn down">Turn down for bearing</option><option value="tap">Tap</option><option value="drill">Drill</option><option value="other">Other</option></select></label>
+        {value.operation === "turn down" && <><label className="field"><span>Target diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.375" required /></label><label className="field"><span>Turned length <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.lengthInches ?? ""} onChange={(event) => update({ lengthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.5" required /></label></>}
+        {value.operation === "tap" && <><label className="field"><span>Thread</span><input value={value.thread ?? ""} onChange={(event) => update({ thread: event.target.value })} placeholder="e.g. 1/4-20" maxLength={40} required /></label><label className="field"><span>Thread depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.75" required /></label></>}
+        {value.operation === "drill" && <><label className="field"><span>Hole diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.diameterInches ?? ""} onChange={(event) => update({ diameterInches: optionalNumber(event.target.value) })} placeholder="e.g. 0.25" required /></label><label className="field"><span>Hole depth <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={value.depthInches ?? ""} onChange={(event) => update({ depthInches: optionalNumber(event.target.value) })} placeholder="e.g. 1.0" required /></label></>}
+        {value.operation === "other" && <label className="field span-2"><span>Instructions</span><textarea value={value.notes ?? ""} onChange={(event) => update({ notes: event.target.value })} placeholder="Describe the operation and dimensions" maxLength={300} required /></label>}
+      </div>
+    </details>
   );
 }
 
@@ -138,6 +146,7 @@ export function ExportApp() {
   const [sessionToken, setSessionToken] = useState("");
   const [disconnecting, setDisconnecting] = useState(false);
   const [friendlyName, setFriendlyName] = useState("");
+  const friendlyNameEdited = useRef(false);
   const [quantity, setQuantity] = useState(1);
   const [machining, setMachining] = useState<DxfMachiningType>("laser");
   const [material, setMaterial] = useState<Material>("wood");
@@ -308,16 +317,19 @@ export function ExportApp() {
     }
   };
 
-  const dxfSuggestionSelection = kind === "dxf" ? selections[0] : undefined;
+  const suggestionSelection = selections[0];
   useEffect(() => {
-    if (!context || !sessionToken || (kind === "dxf" && !dxfSuggestionSelection)) return;
+    if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
     const requestNumber = ++suggestionRequest.current;
     getExportSuggestions(sessionToken, {
       context,
-      selection: dxfSuggestionSelection,
+      selection: suggestionSelection,
     }).then((suggestions) => {
       if (requestNumber !== suggestionRequest.current) return;
       if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
+      if ((kind === "step" || kind === "lathe") && !friendlyNameEdited.current && suggestions.friendlyName) {
+        setFriendlyName(suggestions.friendlyName);
+      }
       const suggestedMaterial = suggestions.material;
       if (kind !== "dxf" || !suggestedMaterial || dxfMaterialEdited.current) return;
       if (dxfMaterialsByMachining[machining].includes(suggestedMaterial)) {
@@ -332,7 +344,7 @@ export function ExportApp() {
     }).catch(() => {
       // Suggestions are best-effort and should never block a manual export.
     });
-  }, [context, dxfSuggestionSelection, kind, machining, sessionToken]);
+  }, [context, suggestionSelection, kind, machining, sessionToken]);
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -412,8 +424,8 @@ export function ExportApp() {
 
         {!context && (
           <div className="notice warning">
-            <strong>Open this app from an Onshape Part Studio.</strong>
-            <span>The document, workspace, and element IDs are missing from the URL.</span>
+            <strong>Open this app from an Onshape Part Studio or selected assembly part.</strong>
+            <span>The source document, workspace, or element IDs are missing from the URL.</span>
           </div>
         )}
 
@@ -439,7 +451,7 @@ export function ExportApp() {
           <section className="card details-card">
             <div className="section-heading"><div className="step-number">2</div><div><h2>Manufacturing details</h2><p>{kind === "lathe" ? "These details become the manual machining request." : "These details travel with the exported file."}</p></div></div>
             <div className="fields">
-              <label className="field span-2"><span>Friendly part name</span><input value={friendlyName} onChange={(e) => setFriendlyName(e.target.value)} placeholder="e.g. Intake side plate" maxLength={80} required /></label>
+              <label className="field span-2"><span>Friendly part name</span><input value={friendlyName} onChange={(e) => { friendlyNameEdited.current = true; setFriendlyName(e.target.value); }} placeholder={kind === "dxf" ? "e.g. Intake side plate" : "Defaults to the selected part name"} maxLength={80} required /></label>
               <label className="field"><span>Quantity</span><input type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
@@ -452,7 +464,7 @@ export function ExportApp() {
                 {latheStockType === "round tube" && <><label className="field"><span>Outside diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={tubeOuterDiameter ?? ""} onChange={(event) => setTubeOuterDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.75" required /></label><label className="field"><span>Inside diameter <em>in</em></span><input type="number" min="0.001" max="100" step="any" value={tubeInnerDiameter ?? ""} onChange={(event) => setTubeInnerDiameter(optionalNumber(event.target.value))} placeholder="e.g. 0.5" required /></label></>}
               </>}
             </div>
-            {kind === "lathe" && <div className="lathe-ends"><EndOperationFields title="End A" subtitle="First selected face" value={endA} onChange={setEndA} /><EndOperationFields title="End B" subtitle="Second selected face" value={endB} onChange={setEndB} /><label className="field"><span>Extra notes <em>optional</em></span><textarea value={endReference} onChange={(event) => setEndReference(event.target.value)} placeholder="e.g. Break all edges" maxLength={300} /></label></div>}
+            {kind === "lathe" && <div className="lathe-ends"><EndOperationFields title="End A" subtitle="First selected face" value={endA} onChange={setEndA} defaultOpen /><EndOperationFields title="End B" subtitle="Second selected face" value={endB} onChange={setEndB} /><label className="field"><span>Extra notes <em>optional</em></span><textarea value={endReference} onChange={(event) => setEndReference(event.target.value)} placeholder="e.g. Break all edges" maxLength={300} /></label></div>}
           </section>
 
           <section className="identity-row">
