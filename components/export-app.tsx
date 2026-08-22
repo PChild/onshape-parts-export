@@ -6,6 +6,7 @@ import { postToOnshape, readOnshapeContext, selectionsFromMessage } from "@/lib/
 import type {
   DxfBounds,
   ExportKind,
+  ExportSuggestionsResult,
   LatheEndOperation,
   LatheStockType,
   Material,
@@ -47,6 +48,8 @@ function formatInches(value: number): string {
 }
 const SESSION_KEY = "shop-export-session";
 const THEME_KEY = "shop-export-theme";
+const SUGGESTION_CACHE_MS = 10 * 60 * 1000;
+const SUGGESTION_DEBOUNCE_MS = 600;
 
 type Theme = "light" | "dark";
 type SubmissionState = "idle" | "working" | "complete" | "error";
@@ -189,6 +192,7 @@ export function ExportApp() {
   const machiningEdited = useRef(false);
   const subsystemEdited = useRef(false);
   const suggestionRequest = useRef(0);
+  const suggestionCache = useRef(new Map<string, { result: ExportSuggestionsResult; cachedAt: number }>());
   const lastSuggestionSelectionKey = useRef("");
   const lastSuggestionRequestKey = useRef("");
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
@@ -367,10 +371,13 @@ export function ExportApp() {
       ].join(":")
     : "";
   const suggestionRequestKey = [
+    context?.server ?? "",
     context?.documentId ?? "",
+    context?.workspaceOrVersion ?? "",
     context?.workspaceOrVersionId ?? "",
     context?.elementId ?? "",
-    sessionToken,
+    context?.configuration ?? "",
+    user?.id ?? "",
     kind,
     suggestionSelectionKey,
   ].join(":");
@@ -395,81 +402,79 @@ export function ExportApp() {
     if (suggestionRequestKey === lastSuggestionRequestKey.current) return;
     lastSuggestionRequestKey.current = suggestionRequestKey;
     const requestNumber = ++suggestionRequest.current;
-    if (!context || !sessionToken || (kind === "dxf" && !suggestionSelection)) return;
+    if (!context || !sessionToken || !suggestionSelection) return;
     const suggestionRequestBody = {
       context,
       selection: suggestionSelection,
       kind,
     };
     const loadSuggestions = async () => {
-      try {
-        const first = await getExportSuggestions(sessionToken, suggestionRequestBody);
-        const metadataMissing = Boolean(suggestionSelection)
-          && first.partMetadataFound !== true
-          && !first.friendlyName
-          && !first.material;
-        if (!metadataMissing) return first;
-      } catch {
-        // Retry once below. Selection changes invalidate this request number.
+      const cached = suggestionCache.current.get(suggestionRequestKey);
+      if (cached && Date.now() - cached.cachedAt < SUGGESTION_CACHE_MS) {
+        return cached.result;
       }
-      if (requestNumber !== suggestionRequest.current) return undefined;
-      return getExportSuggestions(sessionToken, suggestionRequestBody);
+      const result = await getExportSuggestions(sessionToken, suggestionRequestBody);
+      suggestionCache.current.set(suggestionRequestKey, { result, cachedAt: Date.now() });
+      return result;
     };
-    void loadSuggestions().then((suggestions) => {
-      if (!suggestions) return;
-      if (requestNumber !== suggestionRequest.current) return;
-      if (kind === "dxf" && suggestionSelection) {
-        setDxfBoundsResult({
-          requestKey: suggestionRequestKey,
-          status: suggestions.dxfBounds ? "complete" : "unavailable",
-          bounds: suggestions.dxfBounds,
-        });
-      }
-      if (kind === "step" && suggestionSelection) {
-        setStepBoundsResult({
-          requestKey: suggestionRequestKey,
-          status: suggestions.stepBounds ? "complete" : "unavailable",
-          bounds: suggestions.stepBounds,
-        });
-      }
-      if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
-      const metadataMissing = Boolean(suggestionSelection)
-        && suggestions.partMetadataFound !== true
-        && !suggestions.friendlyName
-        && !suggestions.material;
-      if (metadataMissing) {
-        setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
-        return;
-      }
-      if (suggestionSelection) setMessage("");
-      if (!friendlyNameEdited.current) setFriendlyName(suggestions.friendlyName ?? "");
-      const suggestedMaterial = suggestions.material;
-      if (materialEdited.current) return;
-      if (kind === "lathe") {
-        setMaterial(suggestedMaterial && latheMaterials.includes(suggestedMaterial) ? suggestedMaterial : "aluminum 7075");
-        return;
-      }
-      if (kind !== "dxf") return;
-      let targetMachining = machiningRef.current;
-      if (!machiningEdited.current) {
-        targetMachining = suggestedMaterial ? preferredMachiningByMaterial[suggestedMaterial] ?? "laser" : "laser";
-        machiningRef.current = targetMachining;
-        setMachining(targetMachining);
-      }
-      const supportedMaterials = dxfMaterialsByMachining[targetMachining];
-      setMaterial(suggestedMaterial && supportedMaterials.includes(suggestedMaterial) ? suggestedMaterial : supportedMaterials[0]);
-    }).catch(() => {
-      if (requestNumber === suggestionRequest.current) {
+    const timeoutId = window.setTimeout(() => {
+      void loadSuggestions().then((suggestions) => {
+        if (!suggestions) return;
+        if (requestNumber !== suggestionRequest.current) return;
         if (kind === "dxf" && suggestionSelection) {
-          setDxfBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+          setDxfBoundsResult({
+            requestKey: suggestionRequestKey,
+            status: suggestions.dxfBounds ? "complete" : "unavailable",
+            bounds: suggestions.dxfBounds,
+          });
         }
         if (kind === "step" && suggestionSelection) {
-          setStepBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+          setStepBoundsResult({
+            requestKey: suggestionRequestKey,
+            status: suggestions.stepBounds ? "complete" : "unavailable",
+            bounds: suggestions.stepBounds,
+          });
         }
-        setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
-      }
-    });
-  }, [context, suggestionSelection, suggestionSelectionKey, suggestionRequestKey, kind, sessionToken]);
+        if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
+        const metadataMissing = Boolean(suggestionSelection)
+          && suggestions.partMetadataFound !== true
+          && !suggestions.friendlyName
+          && !suggestions.material;
+        if (metadataMissing) {
+          setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
+          return;
+        }
+        if (suggestionSelection) setMessage("");
+        if (!friendlyNameEdited.current) setFriendlyName(suggestions.friendlyName ?? "");
+        const suggestedMaterial = suggestions.material;
+        if (materialEdited.current) return;
+        if (kind === "lathe") {
+          setMaterial(suggestedMaterial && latheMaterials.includes(suggestedMaterial) ? suggestedMaterial : "aluminum 7075");
+          return;
+        }
+        if (kind !== "dxf") return;
+        let targetMachining = machiningRef.current;
+        if (!machiningEdited.current) {
+          targetMachining = suggestedMaterial ? preferredMachiningByMaterial[suggestedMaterial] ?? "laser" : "laser";
+          machiningRef.current = targetMachining;
+          setMachining(targetMachining);
+        }
+        const supportedMaterials = dxfMaterialsByMachining[targetMachining];
+        setMaterial(suggestedMaterial && supportedMaterials.includes(suggestedMaterial) ? suggestedMaterial : supportedMaterials[0]);
+      }).catch(() => {
+        if (requestNumber === suggestionRequest.current) {
+          if (kind === "dxf" && suggestionSelection) {
+            setDxfBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+          }
+          if (kind === "step" && suggestionSelection) {
+            setStepBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
+          }
+          setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
+        }
+      });
+    }, SUGGESTION_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [context, suggestionSelection, suggestionSelectionKey, suggestionRequestKey, kind, sessionToken, user]);
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -504,7 +509,7 @@ export function ExportApp() {
     event.preventDefault();
     if (!canSubmit || !context) return;
     setSubmission("working");
-    setMessage(kind === "lathe" ? "Saving the lathe request…" : "Creating the export in Onshape…");
+    setMessage(kind === "lathe" ? "Saving the lathe request…" : kind === "step" ? "Creating the STL in Onshape…" : "Creating the export in Onshape…");
     try {
       const result = await createExport(sessionToken, {
         kind,
@@ -560,7 +565,7 @@ export function ExportApp() {
 
         <div className="segmented" aria-label="Manufacturing process">
           <button type="button" className={kind === "dxf" ? "active" : ""} onClick={() => changeKind("dxf")}><FaceIcon /><span><strong>DXF</strong><small>Planar face</small></span></button>
-          <button type="button" className={kind === "step" ? "active" : ""} onClick={() => changeKind("step")}><CubeIcon /><span><strong>STEP</strong><small>3D part</small></span></button>
+          <button type="button" className={kind === "step" ? "active" : ""} onClick={() => changeKind("step")}><CubeIcon /><span><strong>STL</strong><small>3D print</small></span></button>
           <button type="button" className={kind === "lathe" ? "active" : ""} onClick={() => changeKind("lathe")}><LatheIcon /><span><strong>Lathe</strong><small>Manual job</small></span></button>
         </div>
 
@@ -623,7 +628,7 @@ export function ExportApp() {
           {message && <div className={`status ${submission}`} role="status">{submission === "complete" && <CheckIcon />}<span>{message}</span></div>}
 
           <button className="submit-button" type="submit" disabled={!canSubmit}>
-            {submission === "working" ? <><span className="spinner" />{kind === "lathe" ? "Saving request…" : "Exporting & uploading…"}</> : <>{kind === "lathe" ? "Add lathe request" : `Export ${kind.toUpperCase()}`}<span>→</span></>}
+            {submission === "working" ? <><span className="spinner" />{kind === "lathe" ? "Saving request…" : "Exporting & uploading…"}</> : <>{kind === "lathe" ? "Add lathe request" : `Export ${kind === "step" ? "STL" : kind.toUpperCase()}`}<span>→</span></>}
           </button>
           {!embedded && context && <p className="standalone-note">Connected to an Onshape document. Selection controls work only while this page is embedded in the right panel.</p>}
         </form>

@@ -3,15 +3,15 @@
 A classroom-focused Onshape right-panel extension that sends manufacturing files and manual machining requests to Firebase:
 
 - Select one planar face and export a DXF for laser, plasma, or waterjet cutting.
-- Select one solid part—or any face on that part—and export a STEP file for 3D printing.
-- Store STEP requests with the fixed material value `3d Print`.
+- Select one solid part—or any face on that part—and export a binary STL file for 3D printing.
+- Store 3D-print requests with the fixed material value `3d Print`.
 - Create a manual-lathe request without exporting a file by selecting its two planar end faces.
 - Measure and store the lathe part's overall face-to-face length in inches and generate an isometric preview.
 - Require a friendly name and quantity; DXF requests also require material thickness in inches, while DXF and lathe requests require material.
 - Measure the selected DXF face's tight, export-aligned rectangular envelope in inches so students can choose appropriately sized stock.
-- Measure STEP parts with a tight X/Y/Z bounding box in inches so students can compare them with printer build volumes.
+- Measure 3D-print parts with a tight X/Y/Z bounding box in inches so students can compare them with printer build volumes.
 - Prefill the editable subsystem field from the Onshape document name for every request, and loosely match a selected DXF part's Onshape material to a supported shop material when possible.
-- Prefill the editable friendly name from the selected Onshape part for STEP and lathe requests.
+- Prefill the editable friendly name from the selected Onshape part for STL and lathe requests.
 - Filter DXF materials by process: laser supports SRPP, polycarbonate, and wood; plasma supports steel plus Aluminum 6061, 7075, and 5052; waterjet supports every listed DXF material.
 - Match explicit Onshape aluminum grades when available and default an unspecified aluminum material to the commonly used Aluminum 6061.
 - Refresh the editable part-name and material defaults when the selected part changes; inferred aluminum DXF parts default to waterjet cutting.
@@ -36,7 +36,7 @@ Onshape right panel (GitHub Pages)
 Firebase HTTPS function
     ├── Onshape OAuth and export API
     ├── Cloud Storage: manufacturing/{dxf|step}/YYYY-MM-DD/file
-    ├── Cloud Storage: manufacturing/previews/YYYY-MM-DD/image
+    ├── Cloud Storage: manufacturing/previews/cache/content-hash.image
     └── Firestore: exports/{exportId} (files and manual lathe requests)
 ```
 
@@ -124,7 +124,7 @@ To keep the exporter visible before students select anything in an assembly, add
 https://GITHUB_USER.github.io/REPOSITORY/?contextType=assembly&documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}
 ```
 
-Open that panel first, then click geometry directly or use its normal selection button. A selected face can be reused for DXF or STEP, and it becomes End A when switching to Lathe so only End B remains to be selected. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
+Open that panel first, then click geometry directly or use its normal selection button. A selected face can be reused for DXF or STL, and it becomes End A when switching to Lathe so only End B remains to be selected. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
 
 Onshape currently does not provide a right-panel message for retrieving geometry that was selected before the panel was first initialized. Keep the panel open before selecting a face; the app then receives normal `SELECTION` messages automatically.
 
@@ -145,13 +145,13 @@ The workflow supplies the repository base path during the Next.js static build a
 The Storage object includes custom metadata for the request and the `exports/{exportId}` Firestore document includes:
 
 - friendly name, quantity, machining type, material, DXF material thickness in inches, and subsystem
-- DXF or STEP type and selected face/body topology ID
+- DXF or 3D-print type and selected face/body topology ID
 - Onshape document, workspace/version, element, and configuration
 - authenticated Onshape user ID, name, and email when available
 - file name, Storage path, MIME type, byte count, status, and server timestamp
 - preview status and, when available, preview file name, Storage path, MIME type, dimensions, and byte count
 - DXF bounding-box status and, when available, `dxfBounds` with width, height, and rectangular area in inches
-- STEP bounding-box status and, when available, `stepBounds` with X, Y, Z, and bounding-box volume in inches
+- 3D-print bounding-box status and, when available, the legacy-compatible `stepBounds` field with X, Y, Z, and bounding-box volume in inches
 
 Lathe requests do not create an exported CAD file. Their material is limited to Aluminum 7075, Polycarb, Steel, or Carbon Fiber. Their Firestore record has `kind: "lathe"`, `machiningType: "lathe"`, a queued status, the resolved owning part ID, `overallLengthInches`, stock dimensions in inches, and the instructions for End A and End B. When available, their preview image is stored alongside the other manufacturing previews.
 
@@ -159,16 +159,31 @@ OAuth refresh tokens are stored only in the backend-only `onshapeSessions` colle
 
 OAuth opens inside the Onshape application pane. After connecting, the app stores an opaque session token in that pane's session storage. **Disconnect** deletes the corresponding backend session and removes the browser token.
 
+## Onshape API usage
+
+The export pane is intentionally conservative with Onshape API calls:
+
+- It waits until a face or part is selected before loading defaults, debounces rapidly changing selections for 600 ms, sends one request for the settled selection, and does not automatically retry missing metadata.
+- Part name, material, face orientation, and bounding boxes are collected by one combined FeatureScript evaluation when possible. A part-metadata request is used only when that combined request fails and the UI cannot rely on an assembly instance name.
+- The browser and backend keep selection suggestions for ten minutes in editable workspaces. The backend keeps a long-lived cache for immutable versions or microversions, while document names are cached for 24 hours.
+- Export reuses the resolved part, face orientation, and measurements from the suggestion cache instead of resolving and measuring the same selection again.
+- Shaded previews are content-addressed in Storage and indexed by source part, configuration, view, and model state. Workspace previews are reused for ten minutes, immutable version/microversion previews for 180 days, and concurrent requests on a warm function instance share one in-flight Onshape call.
+- Lathe submission validates both faces, verifies their common owning part, and measures their separation in one FeatureScript evaluation when the selection already includes its part ID. Body details are reserved for exceptional selection messages that omit it.
+- Remaining asynchronous DXF result checks use exponential backoff from three to fifteen seconds rather than polling every second.
+- 3D-print files use Onshape's synchronous per-part STL endpoint, so they require one file request and no translation-status polling or result-download request. Binary STL coordinates are exported in millimeters for slicer compatibility.
+
+The backend-only `onshapeExportSuggestionCache`, `onshapeDocumentNameCache`, and `onshapePreviewCache` collections contain selection or preview metadata but never OAuth tokens. Their `expiresAt` fields can be configured as Firestore TTL fields if automatic cleanup is desired. Client access is denied by the default Firestore rules because no matching allow rule is present.
+
 ## Notes on exports
 
-- DXF requests resolve the selected planar face with the Part Studio body-details API, then use Onshape's document DXF exporter with that face ID and its derived view plane.
+- DXF requests resolve the selected planar face to an owning Part Studio body, then use Onshape's document DXF exporter with that face ID and its derived view plane. The body-details API is needed only when Onshape's selection message does not include the owning part and no cached resolution exists.
 - DXF stock envelopes use a tight FeatureScript bounding box in the same face-plane coordinate system as the export. They describe the minimum axis-aligned rectangle around the exported face and do not include kerf, clamping, or edge-clearance allowance.
-- STEP bounding boxes use the selected part's tight Part Studio X/Y/Z extents. They do not include supports, rafts, or printer clearance, and slicer reorientation can change the required build volume.
-- STEP requests resolve a selected body or face to its owning Part Studio body, then use the Part Studio translation workflow with that deterministic part ID.
-- DXF, STEP, and lathe requests ask Onshape for a 512×512 shaded PNG/JPEG/WebP preview of the selected part. DXF previews use the selected face orientation; STEP and lathe previews use an isometric orientation. Preview failure does not discard an otherwise valid manufacturing request.
-- Lathe requests verify that both selected end faces are planar, parallel, and belong to one Part Studio body. Their plane separation is converted from Onshape model units to `overallLengthInches`. The app uses the known dimensions of fixed hex stock and asks for round-stock dimensions instead of guessing them from model topology.
+- 3D-print bounding boxes use the selected part's tight Part Studio X/Y/Z extents. They do not include supports, rafts, or printer clearance, and slicer reorientation can change the required build volume.
+- STL requests resolve a selected body or face to its owning Part Studio body, then synchronously export that deterministic part ID. Firestore retains `kind: "step"`, the `stepBounds` field, and the `manufacturing/step/` Storage folder for compatibility with the existing production dashboard; `fileFormat: "STL"` and the `.stl` file name identify the actual output.
+- DXF, STL, and lathe requests use a cached 512×512 shaded PNG/JPEG/WebP preview of the selected part, asking Onshape only on a cache miss. DXF previews use the selected face orientation; STL and lathe previews use an isometric orientation. Preview failure does not discard an otherwise valid manufacturing request.
+- Lathe requests verify that both selected end faces are planar, parallel, and belong to one Part Studio body in the same FeatureScript call that measures their separation as `overallLengthInches`. The app uses the known dimensions of fixed hex stock and asks for round-stock dimensions instead of guessing them from model topology.
 - Suggested document names and materials are best-effort conveniences. Students can edit them, and a failed or unknown metadata lookup does not prevent an export.
-- Onshape may prepare exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
+- Onshape may prepare DXF exports asynchronously; the function follows the returned result URL and polls for up to two minutes before reporting a timeout.
 - The function rejects exports above 250 MB and gives each file a collision-safe suffix.
 - If your enterprise uses a custom Onshape domain, the extension-provided `server` is preserved through OAuth and API calls. Only HTTPS `*.onshape.com` origins are accepted.
 
