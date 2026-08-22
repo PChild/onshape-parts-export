@@ -49,7 +49,6 @@ function formatInches(value: number): string {
 const SESSION_KEY = "shop-export-session";
 const THEME_KEY = "shop-export-theme";
 const SUGGESTION_CACHE_MS = 10 * 60 * 1000;
-const SUGGESTION_DEBOUNCE_MS = 600;
 
 type Theme = "light" | "dark";
 type SubmissionState = "idle" | "working" | "complete" | "error";
@@ -150,6 +149,7 @@ export function ExportApp() {
   const embedded = browserReady && window.parent !== window;
   const [kind, setKind] = useState<ExportKind>("dxf");
   const [selections, setSelections] = useState<OnshapeSelection[]>([]);
+  const selectionsRef = useRef<OnshapeSelection[]>([]);
   const [selecting, setSelecting] = useState(false);
   const allowedSelectionTypes = useRef<readonly OnshapeSelection["entityType"][]>(["FACE"]);
   const expectedSelectionCount = useRef(1);
@@ -188,8 +188,10 @@ export function ExportApp() {
   const subsystemEdited = useRef(false);
   const suggestionRequest = useRef(0);
   const suggestionCache = useRef(new Map<string, { result: ExportSuggestionsResult; cachedAt: number }>());
-  const lastSuggestionSelectionKey = useRef("");
-  const lastSuggestionRequestKey = useRef("");
+  const [reviewState, setReviewState] = useState<{
+    requestKey: string;
+    status: "loading" | "ready";
+  } | null>(null);
   const [latheStockType, setLatheStockType] = useState<LatheStockType>("1/2 rounded hex");
   const [latheDiameter, setLatheDiameter] = useState<number | undefined>();
   const [tubeOuterDiameter, setTubeOuterDiameter] = useState<number | undefined>();
@@ -201,6 +203,19 @@ export function ExportApp() {
   const [message, setMessage] = useState("");
 
   const requiredSelectionCount = kind === "lathe" ? 2 : 1;
+
+  const invalidatePartReview = useCallback(() => {
+    suggestionRequest.current += 1;
+    friendlyNameEdited.current = false;
+    materialEdited.current = false;
+    machiningEdited.current = false;
+    setFriendlyName("");
+    setDxfBoundsResult(null);
+    setStepBoundsResult(null);
+    setReviewState(null);
+    setSubmission("idle");
+    setMessage("");
+  }, []);
 
   useEffect(() => {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
@@ -243,28 +258,32 @@ export function ExportApp() {
       if (event.origin !== context.server) return;
       const parsed = selectionsFromMessage(event.data, allowedSelectionTypes.current);
       if (parsed.length) {
-        setSelections((current) => {
-          const count = expectedSelectionCount.current;
-          const requested = selectionRequestActive.current;
-          const candidates = requested && count > 1 ? [...current, ...parsed] : parsed;
-          const accepted = candidates.filter((selection, index, all) =>
-            all.findIndex((candidate) => candidate.entityType === selection.entityType && candidate.selectionId === selection.selectionId) === index,
-          ).slice(0, count);
-          if (requested) {
-            const pending = accepted.length < count;
-            selectionRequestActive.current = pending;
-            setSelecting(pending);
-          } else {
-            setSelecting(false);
-          }
-          return accepted;
-        });
+        const current = selectionsRef.current;
+        const count = expectedSelectionCount.current;
+        const requested = selectionRequestActive.current;
+        const candidates = requested && count > 1 ? [...current, ...parsed] : parsed;
+        const accepted = candidates.filter((selection, index, all) =>
+          all.findIndex((candidate) => candidate.entityType === selection.entityType && candidate.selectionId === selection.selectionId) === index,
+        ).slice(0, count);
+        const selectionChanged = JSON.stringify(accepted) !== JSON.stringify(current);
+        if (selectionChanged) {
+          selectionsRef.current = accepted;
+          setSelections(accepted);
+          invalidatePartReview();
+        }
+        if (requested) {
+          const pending = accepted.length < count;
+          selectionRequestActive.current = pending;
+          setSelecting(pending);
+        } else {
+          setSelecting(false);
+        }
       }
     };
     window.addEventListener("message", handler);
     postToOnshape(context, { messageName: "applicationInit" });
     return () => window.removeEventListener("message", handler);
-  }, [context]);
+  }, [context, invalidatePartReview]);
 
   const selectTarget = useCallback((replaceExisting = false) => {
     if (!context) return;
@@ -278,16 +297,17 @@ export function ExportApp() {
     allowedSelectionTypes.current = entityTypes;
     expectedSelectionCount.current = selectionCount;
     selectionRequestActive.current = true;
+    selectionsRef.current = preserved;
     setSelections(preserved);
+    invalidatePartReview();
     setSelecting(true);
-    setMessage("");
     postToOnshape(context, {
       messageName: "requestSelection",
       messageId: crypto.randomUUID(),
       entityTypeSpecifier: entityTypes,
       requiredSelectionCount: requestedSelectionCount,
     });
-  }, [context, kind, selections]);
+  }, [context, invalidatePartReview, kind, selections]);
 
   const changeKind = (next: ExportKind) => {
     if (next === kind) return;
@@ -300,10 +320,10 @@ export function ExportApp() {
     if (next === "dxf" && !dxfMaterialsByMachining[machining].includes(material)) {
       setMaterial(dxfMaterialsByMachining[machining][0]);
     }
+    selectionsRef.current = [];
     setSelections([]);
+    invalidatePartReview();
     setSelecting(false);
-    setSubmission("idle");
-    setMessage("");
   };
 
   const changeMachining = (next: DxfMachiningType) => {
@@ -377,28 +397,27 @@ export function ExportApp() {
     kind,
     suggestionSelectionKey,
   ].join(":");
+  const currentReviewStatus = reviewState?.requestKey === suggestionRequestKey ? reviewState.status : "idle";
+  const reviewLoading = currentReviewStatus === "loading";
+  const reviewReady = currentReviewStatus === "ready";
   const currentDxfBoundsResult = dxfBoundsResult?.requestKey === suggestionRequestKey ? dxfBoundsResult : undefined;
   const dxfBounds = currentDxfBoundsResult?.bounds;
   const dxfBoundsStatus = kind !== "dxf" || !suggestionSelection || !context || !sessionToken
     ? "idle"
-    : currentDxfBoundsResult?.status ?? "loading";
+    : reviewLoading ? "loading" : reviewReady ? currentDxfBoundsResult?.status ?? "unavailable" : "idle";
   const currentStepBoundsResult = stepBoundsResult?.requestKey === suggestionRequestKey ? stepBoundsResult : undefined;
   const stepBounds = currentStepBoundsResult?.bounds;
   const stepBoundsStatus = kind !== "step" || !suggestionSelection || !context || !sessionToken
     ? "idle"
-    : currentStepBoundsResult?.status ?? "loading";
-  useEffect(() => {
-    const selectionChanged = suggestionSelectionKey !== lastSuggestionSelectionKey.current;
-    if (selectionChanged) {
-      lastSuggestionSelectionKey.current = suggestionSelectionKey;
-      friendlyNameEdited.current = false;
-      materialEdited.current = false;
-      machiningEdited.current = false;
-    }
-    if (suggestionRequestKey === lastSuggestionRequestKey.current) return;
-    lastSuggestionRequestKey.current = suggestionRequestKey;
-    const requestNumber = ++suggestionRequest.current;
+    : reviewLoading ? "loading" : reviewReady ? currentStepBoundsResult?.status ?? "unavailable" : "idle";
+
+  const loadPartDetailsForReview = async () => {
     if (!context || !sessionToken || !suggestionSelection) return;
+    const requestNumber = ++suggestionRequest.current;
+    const requestKey = suggestionRequestKey;
+    setReviewState({ requestKey, status: "loading" });
+    setSubmission("idle");
+    setMessage("Loading the selected part's Onshape details…");
     const suggestionRequestBody = {
       context,
       selection: suggestionSelection,
@@ -413,42 +432,30 @@ export function ExportApp() {
       suggestionCache.current.set(suggestionRequestKey, { result, cachedAt: Date.now() });
       return result;
     };
-    const timeoutId = window.setTimeout(() => {
-      void loadSuggestions().then((suggestions) => {
-        if (!suggestions) return;
-        if (requestNumber !== suggestionRequest.current) return;
-        if (kind === "dxf" && suggestionSelection) {
-          setDxfBoundsResult({
-            requestKey: suggestionRequestKey,
-            status: suggestions.dxfBounds ? "complete" : "unavailable",
-            bounds: suggestions.dxfBounds,
-          });
-        }
-        if (kind === "step" && suggestionSelection) {
-          setStepBoundsResult({
-            requestKey: suggestionRequestKey,
-            status: suggestions.stepBounds ? "complete" : "unavailable",
-            bounds: suggestions.stepBounds,
-          });
-        }
-        if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
-        const metadataMissing = Boolean(suggestionSelection)
-          && suggestions.partMetadataFound !== true
-          && !suggestions.friendlyName
-          && !suggestions.material;
-        if (metadataMissing) {
-          setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
-          return;
-        }
-        if (suggestionSelection) setMessage("");
-        if (!friendlyNameEdited.current) setFriendlyName(suggestions.friendlyName ?? "");
-        const suggestedMaterial = suggestions.material;
-        if (materialEdited.current) return;
-        if (kind === "lathe") {
-          setMaterial(suggestedMaterial && latheMaterials.includes(suggestedMaterial) ? suggestedMaterial : "aluminum 7075");
-          return;
-        }
-        if (kind !== "dxf") return;
+    try {
+      const suggestions = await loadSuggestions();
+      if (requestNumber !== suggestionRequest.current) return;
+      if (kind === "dxf") {
+        setDxfBoundsResult({
+          requestKey,
+          status: suggestions.dxfBounds ? "complete" : "unavailable",
+          bounds: suggestions.dxfBounds,
+        });
+      }
+      if (kind === "step") {
+        setStepBoundsResult({
+          requestKey,
+          status: suggestions.stepBounds ? "complete" : "unavailable",
+          bounds: suggestions.stepBounds,
+        });
+      }
+      if (!subsystemEdited.current && suggestions.subsystem) setSubsystem(suggestions.subsystem);
+      if (!friendlyNameEdited.current) setFriendlyName(suggestions.friendlyName ?? "");
+      const suggestedMaterial = suggestions.material;
+      if (!materialEdited.current && kind === "lathe") {
+        setMaterial(suggestedMaterial && latheMaterials.includes(suggestedMaterial) ? suggestedMaterial : "aluminum 7075");
+      }
+      if (!materialEdited.current && kind === "dxf") {
         let targetMachining = machiningRef.current;
         if (!machiningEdited.current) {
           targetMachining = suggestedMaterial ? preferredMachiningByMaterial[suggestedMaterial] ?? "laser" : "laser";
@@ -457,20 +464,24 @@ export function ExportApp() {
         }
         const supportedMaterials = dxfMaterialsByMachining[targetMachining];
         setMaterial(suggestedMaterial && supportedMaterials.includes(suggestedMaterial) ? suggestedMaterial : supportedMaterials[0]);
-      }).catch(() => {
-        if (requestNumber === suggestionRequest.current) {
-          if (kind === "dxf" && suggestionSelection) {
-            setDxfBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
-          }
-          if (kind === "step" && suggestionSelection) {
-            setStepBoundsResult({ requestKey: suggestionRequestKey, status: "unavailable" });
-          }
-          setMessage("Could not load defaults for the selected part. You can enter them manually or select the part again.");
-        }
-      });
-    }, SUGGESTION_DEBOUNCE_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [context, suggestionSelection, suggestionSelectionKey, suggestionRequestKey, kind, sessionToken, user]);
+      }
+      const metadataMissing = suggestions.partMetadataFound !== true
+        && !suggestions.friendlyName
+        && !suggestions.material;
+      setReviewState({ requestKey, status: "ready" });
+      setSubmission(metadataMissing ? "error" : "idle");
+      setMessage(metadataMissing
+        ? "Onshape could not supply name or material defaults. Enter them manually, review the remaining fields, then submit again."
+        : "Part details loaded. Review or override the name and material, then submit again.");
+    } catch {
+      if (requestNumber !== suggestionRequest.current) return;
+      if (kind === "dxf") setDxfBoundsResult({ requestKey, status: "unavailable" });
+      if (kind === "step") setStepBoundsResult({ requestKey, status: "unavailable" });
+      setReviewState({ requestKey, status: "ready" });
+      setSubmission("error");
+      setMessage("Could not load defaults for the selected part. Enter the required values manually, then submit again.");
+    }
+  };
 
   const latheDetailsComplete = useMemo(() => {
     const stockComplete = latheStockType === "round shaft"
@@ -486,10 +497,18 @@ export function ExportApp() {
   const quantityComplete = Number.isInteger(quantity) && quantity >= 1 && quantity <= 999;
   const materialThicknessComplete = kind !== "dxf" || positive(materialThickness);
   const accountComplete = Boolean(user && sessionToken);
+  const canReview = Boolean(
+    context
+    && selectionComplete
+    && accountComplete
+    && !reviewLoading
+    && submission !== "working",
+  );
 
   const canSubmit = useMemo(
     () => Boolean(
       context
+      && reviewReady
       && selectionComplete
       && friendlyNameComplete
       && quantityComplete
@@ -498,12 +517,18 @@ export function ExportApp() {
       && materialThicknessComplete
       && (kind !== "lathe" || latheDetailsComplete),
     ),
-    [context, selectionComplete, friendlyNameComplete, quantityComplete, accountComplete, submission, materialThicknessComplete, kind, latheDetailsComplete],
+    [context, reviewReady, selectionComplete, friendlyNameComplete, quantityComplete, accountComplete, submission, materialThicknessComplete, kind, latheDetailsComplete],
   );
+  const primaryActionEnabled = reviewReady ? canSubmit : canReview;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canSubmit || !context) return;
+    if (!context) return;
+    if (!reviewReady) {
+      if (canReview) await loadPartDetailsForReview();
+      return;
+    }
+    if (!canSubmit) return;
     setSubmission("working");
     setMessage(kind === "lathe" ? "Saving the lathe request…" : kind === "step" ? "Creating the STL in Onshape…" : "Creating the export in Onshape…");
     try {
@@ -565,7 +590,7 @@ export function ExportApp() {
           <button type="button" className={kind === "lathe" ? "active" : ""} onClick={() => changeKind("lathe")}><LatheIcon /><span><strong>Lathe</strong><small>Manual job</small></span></button>
         </div>
 
-        <form onSubmit={submit}>
+        <form onSubmit={submit} noValidate>
           <section className={`card selection-card ${selectionComplete ? "" : "missing"}`}>
             <div className="step-number">1</div>
             <div className="card-copy">
@@ -579,9 +604,9 @@ export function ExportApp() {
           </section>
 
           <section className="card details-card">
-            <div className="section-heading"><div className="step-number">2</div><div><h2>Manufacturing details</h2><p>{kind === "lathe" ? "These details become the manual machining request." : "These details travel with the exported file."}</p></div></div>
+            <div className="section-heading"><div className="step-number">2</div><div><h2>Manufacturing details</h2><p>Onshape name, material, and measurements load only when you review this request. You can override the suggested values before submitting.</p></div></div>
             <div className="fields">
-              <label className={`field span-2 ${friendlyNameComplete ? "" : "missing"}`}><span>Friendly part name</span><input aria-invalid={!friendlyNameComplete} value={friendlyName} onChange={(e) => { friendlyNameEdited.current = true; setFriendlyName(e.target.value); }} placeholder={kind === "dxf" ? "e.g. Intake side plate" : "Defaults to the selected part name"} maxLength={80} required /></label>
+              <label className={`field span-2 ${reviewReady && !friendlyNameComplete ? "missing" : ""}`}><span>Friendly part name</span><input aria-invalid={reviewReady && !friendlyNameComplete} value={friendlyName} onChange={(e) => { friendlyNameEdited.current = true; setFriendlyName(e.target.value); }} placeholder={kind === "dxf" ? "Suggested after review, or enter a name" : "Suggested from the selected part after review"} maxLength={80} required /></label>
               <label className={`field ${quantityComplete ? "" : "missing"}`}><span>Quantity</span><input aria-invalid={!quantityComplete} type="number" min="1" max="999" step="1" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} required /></label>
               <label className="field"><span>Machining type</span>{kind === "step" ? <div className="fixed-value"><CubeIcon />3D Printed</div> : kind === "lathe" ? <div className="fixed-value"><LatheIcon />Manual lathe</div> : <select value={machining} onChange={(e) => changeMachining(e.target.value as DxfMachiningType)}><option value="laser">Laser</option><option value="plasma">Plasma</option><option value="waterjet">Waterjet</option></select>}</label>
               {kind === "step" && <label className="field"><span>Material</span><div className="fixed-value"><CubeIcon />3D Print</div></label>}
@@ -590,7 +615,7 @@ export function ExportApp() {
               {kind === "dxf" && suggestionSelection && <div className={`bounds-card span-2 ${dxfBoundsStatus}`} aria-live="polite">
                 <div><span>DXF stock envelope</span>{dxfBounds
                   ? <strong>{formatInches(dxfBounds.widthInches)} × {formatInches(dxfBounds.heightInches)} in</strong>
-                  : <strong>{dxfBoundsStatus === "loading" ? "Measuring selected face…" : dxfBoundsStatus === "idle" ? "Connect to measure" : "Measurement unavailable"}</strong>}</div>
+                  : <strong>{dxfBoundsStatus === "loading" ? "Measuring selected face…" : dxfBoundsStatus === "idle" ? "Measured during review" : "Measurement unavailable"}</strong>}</div>
                 <p>{dxfBounds
                   ? `${dxfBounds.areaSquareInches.toLocaleString(undefined, { maximumFractionDigits: 2 })} in² minimum rectangular area. Choose stock larger than this envelope for edge clearance.`
                   : "This estimate is optional and does not block the export."}</p>
@@ -598,7 +623,7 @@ export function ExportApp() {
               {kind === "step" && suggestionSelection && <div className={`bounds-card span-2 ${stepBoundsStatus}`} aria-live="polite">
                 <div><span>3D print bounding box</span>{stepBounds
                   ? <strong>{formatInches(stepBounds.xInches)} × {formatInches(stepBounds.yInches)} × {formatInches(stepBounds.zInches)} in</strong>
-                  : <strong>{stepBoundsStatus === "loading" ? "Measuring selected part…" : stepBoundsStatus === "idle" ? "Connect to measure" : "Measurement unavailable"}</strong>}</div>
+                  : <strong>{stepBoundsStatus === "loading" ? "Measuring selected part…" : stepBoundsStatus === "idle" ? "Measured during review" : "Measurement unavailable"}</strong>}</div>
                 <p>{stepBounds
                   ? `${stepBounds.volumeCubicInches.toLocaleString(undefined, { maximumFractionDigits: 2 })} in³ bounding-box volume along the Part Studio X/Y/Z axes. The part can still be reoriented in the slicer.`
                   : "This estimate is optional and does not block the export."}</p>
@@ -623,8 +648,14 @@ export function ExportApp() {
 
           {message && <div className={`status ${submission}`} role="status">{submission === "complete" && <CheckIcon />}<span>{message}</span></div>}
 
-          <button className="submit-button" type="submit" disabled={!canSubmit}>
-            {submission === "working" ? <><span className="spinner" />{kind === "lathe" ? "Saving request…" : "Exporting & uploading…"}</> : <>{kind === "lathe" ? "Add lathe request" : `Export ${kind === "step" ? "STL" : kind.toUpperCase()}`}<span>→</span></>}
+          <button className="submit-button" type="submit" disabled={!primaryActionEnabled}>
+            {reviewLoading
+              ? <><span className="spinner" />Loading part details…</>
+              : submission === "working"
+                ? <><span className="spinner" />{kind === "lathe" ? "Saving request…" : "Exporting & uploading…"}</>
+                : !reviewReady
+                  ? <>Review {kind === "lathe" ? "lathe request" : `${kind === "step" ? "STL" : kind.toUpperCase()} export`}<span>→</span></>
+                  : <>{kind === "lathe" ? "Add lathe request" : `Export ${kind === "step" ? "STL" : kind.toUpperCase()}`}<span>→</span></>}
           </button>
           {!embedded && context && <p className="standalone-note">Connected to an Onshape document. Selection controls work only while this page is embedded in the right panel.</p>}
         </form>

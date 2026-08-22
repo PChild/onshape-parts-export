@@ -29,6 +29,9 @@ const PREVIEW_SIZE = 512;
 const METERS_TO_INCHES = 39.37007874015748;
 const WORKSPACE_SUGGESTION_CACHE_MS = 10 * 60 * 1000;
 const IMMUTABLE_SUGGESTION_CACHE_MS = 180 * 24 * 60 * 60 * 1000;
+const WORKSPACE_ASSEMBLY_CACHE_MS = 10 * 60 * 1000;
+const IMMUTABLE_ASSEMBLY_CACHE_MS = 180 * 24 * 60 * 60 * 1000;
+const MAX_FIRESTORE_CACHE_JSON_BYTES = 900 * 1024;
 const DOCUMENT_NAME_CACHE_MS = 24 * 60 * 60 * 1000;
 const WORKSPACE_PREVIEW_CACHE_MS = 10 * 60 * 1000;
 const IMMUTABLE_PREVIEW_CACHE_MS = 180 * 24 * 60 * 60 * 1000;
@@ -670,6 +673,8 @@ interface OnshapeAssemblyDefinition {
   parts?: OnshapeAssemblyInstance[];
 }
 
+const pendingAssemblyDefinitionRequests = new Map<string, Promise<OnshapeAssemblyDefinition>>();
+
 type OnshapeAssemblySource = OnshapeAssemblyInstance | OnshapeAssemblyContainer;
 
 interface ResolvedSelections {
@@ -897,6 +902,80 @@ function sourceExportContext(
   return undefined;
 }
 
+function assemblyDefinitionCacheId(userId: string, context: ExportBody["context"]): string {
+  return tokenHash(JSON.stringify({
+    userId,
+    server: context.server,
+    documentId: context.documentId,
+    workspaceOrVersion: context.workspaceOrVersion,
+    workspaceOrVersionId: context.workspaceOrVersionId,
+    elementId: context.elementId,
+    configuration: context.configuration ?? "",
+  }));
+}
+
+async function getAssemblyDefinition(
+  context: ExportBody["context"],
+  session: StoredSession,
+  sessionId: string,
+  version: string,
+): Promise<OnshapeAssemblyDefinition> {
+  const cacheId = assemblyDefinitionCacheId(session.user.id, context);
+  const cacheRef = db.collection("onshapeAssemblyDefinitionCache").doc(cacheId);
+  const cached = await cacheRef.get().catch((error: unknown) => {
+    console.warn("Could not read the assembly-definition cache.", error);
+    return undefined;
+  });
+  if (cached?.exists) {
+    const data = cached.data() as { definitionJson?: unknown; expiresAt?: unknown };
+    if (data.expiresAt instanceof Timestamp && data.expiresAt.toMillis() > Date.now() && typeof data.definitionJson === "string") {
+      const definition = (() => {
+        try { return JSON.parse(data.definitionJson) as OnshapeAssemblyDefinition; } catch { return undefined; }
+      })();
+      if (definition?.rootAssembly) return definition;
+    }
+  }
+
+  const pending = pendingAssemblyDefinitionRequests.get(cacheId);
+  if (pending) return pending;
+  const request = (async () => {
+    const endpoint = new URL(
+      `${session.server}/api/${version}/assemblies/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
+    );
+    if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
+    const response = await authorizedOnshapeFetch(endpoint.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    }, session, sessionId);
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 400);
+      throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not inspect the current assembly. ${detail}`.trim());
+    }
+    const definition = await response.json().catch(() => null) as OnshapeAssemblyDefinition | null;
+    if (!definition?.rootAssembly) throw new HttpError(502, "Onshape returned an invalid assembly definition.");
+    const definitionJson = JSON.stringify(definition);
+    if (Buffer.byteLength(definitionJson, "utf8") <= MAX_FIRESTORE_CACHE_JSON_BYTES) {
+      const ttl = context.workspaceOrVersion === "w" ? WORKSPACE_ASSEMBLY_CACHE_MS : IMMUTABLE_ASSEMBLY_CACHE_MS;
+      await cacheRef.set({
+        definitionJson,
+        expiresAt: Timestamp.fromMillis(Date.now() + ttl),
+        createdAt: FieldValue.serverTimestamp(),
+      }).catch((error: unknown) => {
+        console.warn("Could not write the assembly-definition cache.", error);
+      });
+    } else {
+      console.warn(`Assembly definition ${cacheId} is too large for the Firestore cache.`);
+    }
+    return definition;
+  })();
+  pendingAssemblyDefinitionRequests.set(cacheId, request);
+  try {
+    return await request;
+  } finally {
+    pendingAssemblyDefinitionRequests.delete(cacheId);
+  }
+}
+
 async function resolveAssemblySelections(
   context: ExportBody["context"],
   selections: ExportBody["selections"],
@@ -905,20 +984,7 @@ async function resolveAssemblySelections(
   version: string,
 ): Promise<ResolvedSelections> {
   if (context.contextType !== "assembly") return { context, selections, exportTarget: { context } };
-  const endpoint = new URL(
-    `${session.server}/api/${version}/assemblies/d/${encodeURIComponent(context.documentId)}/${context.workspaceOrVersion}/${encodeURIComponent(context.workspaceOrVersionId)}/e/${encodeURIComponent(context.elementId)}`,
-  );
-  if (context.configuration) endpoint.searchParams.set("configuration", context.configuration);
-  const response = await authorizedOnshapeFetch(endpoint.toString(), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  }, session, sessionId);
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 400);
-    throw new HttpError(response.status >= 400 && response.status < 500 ? 422 : 502, `Onshape could not inspect the current assembly. ${detail}`.trim());
-  }
-  const definition = await response.json().catch(() => null) as OnshapeAssemblyDefinition | null;
-  if (!definition?.rootAssembly) throw new HttpError(502, "Onshape returned an invalid assembly definition.");
+  const definition = await getAssemblyDefinition(context, session, sessionId, version);
   const instances = [
     ...(Array.isArray(definition?.rootAssembly?.instances) ? definition.rootAssembly.instances : []),
     ...(Array.isArray(definition?.subAssemblies) ? definition.subAssemblies.flatMap((assembly) => Array.isArray(assembly.instances) ? assembly.instances : []) : []),
