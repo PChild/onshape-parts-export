@@ -17,7 +17,7 @@ A classroom-focused Onshape right-panel extension that sends manufacturing files
 - Refresh the editable part-name and material defaults when the selected part changes; inferred aluminum DXF parts default to waterjet cutting.
 - Capture fixed hex profiles, custom round shaft/tube diameters, and independent turn-down, tap, drill, or custom instructions for both ends.
 - Keep the two lathe end-operation sections collapsible for smaller classroom screens.
-- Adopt face selections made while the panel is open, preserve compatible selections when switching processes, and reuse one selected face as Lathe End A.
+- Adopt face selections made while the panel is open, clear captured geometry when switching processes, and preserve Lathe End A while requesting End B.
 - Highlight every missing required selection, input, lathe operation, and account connection that is blocking submission.
 - Record the authenticated Onshape user with every export or manual request.
 - Store generated files in Cloud Storage and every manufacturing record in Firestore.
@@ -124,7 +124,7 @@ To keep the exporter visible before students select anything in an assembly, add
 https://GITHUB_USER.github.io/REPOSITORY/?contextType=assembly&documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}
 ```
 
-Open that panel first, then click geometry directly or use its normal selection button. A selected face can be reused for DXF or STL, and it becomes End A when switching to Lathe so only End B remains to be selected. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
+Open that panel first, then click geometry directly or use its normal selection button. Switching between DXF, STL, and Lathe clears the geometry captured by the app so each process starts with an intentional selection. Within the Lathe process, the first selected face remains End A while the app requests End B. The backend reads the assembly definition after the selection and resolves the chosen occurrence to its source document microversion, Part Studio, configuration, and part ID. Keep the original **Part Studio** extension too.
 
 Onshape currently does not provide a right-panel message for retrieving geometry that was selected before the panel was first initialized. Keep the panel open before selecting a face; the app then receives normal `SELECTION` messages automatically.
 

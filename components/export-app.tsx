@@ -94,11 +94,6 @@ function selectionTypesForKind(kind: ExportKind): readonly OnshapeSelection["ent
   return kind === "step" ? ["BODY", "FACE"] : ["FACE"];
 }
 
-function compatibleSelectionsForKind(kind: ExportKind, selections: OnshapeSelection[]): OnshapeSelection[] {
-  const compatible = selections.filter((selection) => selectionTypesForKind(kind).includes(selection.entityType));
-  return compatible.slice(0, kind === "lathe" ? 2 : 1);
-}
-
 function positive(value: number | undefined): boolean {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -295,6 +290,7 @@ export function ExportApp() {
   }, [context, kind, selections]);
 
   const changeKind = (next: ExportKind) => {
+    if (next === kind) return;
     if (context && selectionRequestActive.current) postToOnshape(context, { messageName: "stopRequest" });
     selectionRequestActive.current = false;
     allowedSelectionTypes.current = selectionTypesForKind(next);
@@ -304,7 +300,7 @@ export function ExportApp() {
     if (next === "dxf" && !dxfMaterialsByMachining[machining].includes(material)) {
       setMaterial(dxfMaterialsByMachining[machining][0]);
     }
-    setSelections((current) => compatibleSelectionsForKind(next, current));
+    setSelections([]);
     setSelecting(false);
     setSubmission("idle");
     setMessage("");
