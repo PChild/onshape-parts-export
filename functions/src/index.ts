@@ -346,6 +346,33 @@ async function authorizedOnshapeFetch(
   return response;
 }
 
+async function authorizedOnshapeGetFollowingRedirects(
+  url: string,
+  headers: HeadersInit,
+  session: StoredSession,
+  sessionId: string,
+): Promise<globalThis.Response> {
+  let currentUrl = url;
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    const response = await authorizedOnshapeFetch(currentUrl, {
+      method: "GET",
+      headers,
+      redirect: "manual",
+    }, session, sessionId);
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    if (redirectCount === 5) throw new HttpError(502, "Onshape returned too many redirects for the export.");
+    const location = response.headers.get("location");
+    if (!location) throw new HttpError(502, "Onshape returned an export redirect without a destination.");
+    const redirectedUrl = new URL(location, currentUrl);
+    // The STL API redirects to a regional Onshape modeling server. Native
+    // fetch strips Authorization across origins, so follow it explicitly but
+    // never forward the OAuth bearer token outside Onshape-controlled hosts.
+    safeOnshapeOrigin(redirectedUrl.origin);
+    currentUrl = redirectedUrl.toString();
+  }
+  throw new HttpError(502, "Onshape could not resolve the export redirect.");
+}
+
 async function loadSession(req: Request): Promise<{ id: string; data: StoredSession }> {
   const id = tokenHash(bearerToken(req));
   const ref = db.collection("onshapeSessions").doc(id);
@@ -1698,11 +1725,12 @@ async function callOnshapeExport(
     if (linkDocumentId && linkDocumentId !== source.documentId) {
       stlEndpoint.searchParams.set("linkDocumentId", linkDocumentId);
     }
-    const stlResponse = await authorizedOnshapeFetch(stlEndpoint.toString(), {
-      method: "GET",
-      headers: { Accept: "model/stl, application/sla, application/octet-stream" },
-      redirect: "follow",
-    }, session, sessionId);
+    const stlResponse = await authorizedOnshapeGetFollowingRedirects(
+      stlEndpoint.toString(),
+      { Accept: "application/octet-stream, application/json;charset=UTF-8; qs=0.09" },
+      session,
+      sessionId,
+    );
     if (!stlResponse.ok) {
       const detail = (await stlResponse.text()).slice(0, 500);
       throw new HttpError(stlResponse.status >= 400 && stlResponse.status < 500 ? 422 : 502, `Onshape could not create this STL export. ${detail}`.trim());
